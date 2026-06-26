@@ -1,5 +1,7 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import (
+    Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -7,7 +9,21 @@ class Base(DeclarativeBase):
     pass
 
 
+class Clinic(Base):
+    __tablename__ = "clinics"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+
+    users = relationship("User", back_populates="clinic")
+    resources = relationship("Resource", back_populates="clinic")
+    services = relationship("Service", back_populates="clinic")
+    rules = relationship("Rule", back_populates="clinic")
+    appointments = relationship("Appointment", back_populates="clinic")
+
+
 class Role(Base):
+    """Clinical role — what job someone does (Vet, Tech, etc.)."""
     __tablename__ = "roles"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -23,9 +39,17 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    # SYSTEM_ADMIN | CLINIC_ADMIN | USER
+    system_role = Column(String, nullable=False, default="USER")
+    # nullable: SYSTEM_ADMIN is not tied to one clinic
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=True)
+    # clinical role (Vet, Tech…); nullable for admin accounts
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
     is_active = Column(Boolean, default=True)
 
+    clinic = relationship("Clinic", back_populates="users")
     role = relationship("Role", back_populates="users")
     allocations = relationship("AppointmentAllocation", back_populates="user")
     override_logs = relationship("OverrideLog", back_populates="overridden_by_user")
@@ -35,20 +59,27 @@ class Resource(Base):
     __tablename__ = "resources"
 
     id = Column(Integer, primary_key=True, index=True)
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False)
     name = Column(String, nullable=False)
     resource_type = Column(String, nullable=False)
 
+    clinic = relationship("Clinic", back_populates="resources")
     allocations = relationship("AppointmentAllocation", back_populates="resource")
     rules = relationship("Rule", back_populates="required_resource")
 
 
 class Service(Base):
     __tablename__ = "services"
+    __table_args__ = (
+        UniqueConstraint("clinic_id", "name", name="uq_service_clinic_name"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, nullable=False)
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False)
+    name = Column(String, nullable=False)
     default_duration_minutes = Column(Integer, nullable=False, default=30)
 
+    clinic = relationship("Clinic", back_populates="services")
     appointments = relationship("Appointment", back_populates="service")
     rules = relationship("Rule", back_populates="service")
 
@@ -57,12 +88,14 @@ class Rule(Base):
     __tablename__ = "rules"
 
     id = Column(Integer, primary_key=True, index=True)
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
     required_role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
     required_resource_id = Column(Integer, ForeignKey("resources.id"), nullable=True)
     is_hard_stop = Column(Boolean, default=False)
     description = Column(String, nullable=False)
 
+    clinic = relationship("Clinic", back_populates="rules")
     service = relationship("Service", back_populates="rules")
     required_role = relationship("Role", back_populates="rules")
     required_resource = relationship("Resource", back_populates="rules")
@@ -73,6 +106,7 @@ class Appointment(Base):
     __tablename__ = "appointments"
 
     id = Column(Integer, primary_key=True, index=True)
+    clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=False)
@@ -80,6 +114,7 @@ class Appointment(Base):
     patient_name = Column(String, nullable=False)
     status = Column(String, default="scheduled")
 
+    clinic = relationship("Clinic", back_populates="appointments")
     service = relationship("Service", back_populates="appointments")
     allocations = relationship(
         "AppointmentAllocation", back_populates="appointment", cascade="all, delete-orphan"
@@ -114,5 +149,3 @@ class OverrideLog(Base):
     appointment = relationship("Appointment", back_populates="override_logs")
     rule = relationship("Rule", back_populates="override_logs")
     overridden_by_user = relationship("User", back_populates="override_logs")
-
-

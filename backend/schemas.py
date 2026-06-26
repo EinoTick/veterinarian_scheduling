@@ -1,6 +1,27 @@
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, EmailStr, model_validator
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+# ── Clinics ───────────────────────────────────────────────────────────────────
+
+class ClinicOut(BaseModel):
+    id: int
+    name: str
+
+    model_config = {"from_attributes": True}
 
 
 # ── Roles ────────────────────────────────────────────────────────────────────
@@ -15,11 +36,24 @@ class RoleOut(BaseModel):
 
 # ── Users ────────────────────────────────────────────────────────────────────
 
+class UserCreate(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    system_role: str = "USER"  # SYSTEM_ADMIN | CLINIC_ADMIN | USER
+    role_id: Optional[int] = None
+    # Only used when a SYSTEM_ADMIN creates a user for a specific clinic
+    clinic_id: Optional[int] = None
+
+
 class UserOut(BaseModel):
     id: int
     name: str
-    role: RoleOut
+    email: str
+    system_role: str
     is_active: bool
+    clinic_id: Optional[int]
+    role: Optional[RoleOut]
 
     model_config = {"from_attributes": True}
 
@@ -93,7 +127,6 @@ class AppointmentCreate(BaseModel):
     patient_name: str
     allocations: List[AllocationIn] = []
     override: bool = False
-    # When override=True, the client must supply the user who is overriding
     overriding_user_id: Optional[int] = None
 
 

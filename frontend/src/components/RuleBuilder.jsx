@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 
-const API = "http://localhost:8000";
+const API = "http://localhost:8000/api";
 
 export default function RuleBuilder({ onRuleCreated }) {
   const [services, setServices] = useState([]);

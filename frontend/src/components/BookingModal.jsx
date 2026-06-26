@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, ShieldAlert } from "lucide-react";
 
-const API = "http://localhost:8000";
+const API = "http://localhost:8000/api";
 
 export default function BookingModal({ open, onClose, onBooked }) {
   const [services, setServices] = useState([]);
