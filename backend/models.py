@@ -1,7 +1,5 @@
 from datetime import datetime
-from sqlalchemy import (
-    Boolean, Column, DateTime, ForeignKey, Integer, String, create_engine
-)
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -118,5 +116,3 @@ class OverrideLog(Base):
     overridden_by_user = relationship("User", back_populates="override_logs")
 
 
-DATABASE_URL = "sqlite:///./vet_clinic.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})

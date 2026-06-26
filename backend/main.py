@@ -3,11 +3,12 @@ from typing import List
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
+from database import SessionLocal, engine, get_db
 from models import (
     Appointment, AppointmentAllocation, Base, OverrideLog,
-    Resource, Role, Rule, Service, User, engine,
+    Resource, Role, Rule, Service, User,
 )
 from schemas import (
     AppointmentCreate, AppointmentOut, ResourceOut, RoleOut,
@@ -26,17 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-
 Base.metadata.create_all(bind=engine)
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # ── Seed ──────────────────────────────────────────────────────────────────────
