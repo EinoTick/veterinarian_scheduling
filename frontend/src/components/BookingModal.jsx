@@ -10,10 +10,10 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, ShieldAlert } from "lucide-react";
-
-const API = "http://localhost:8000/api";
+import { useAuth } from "@/context/AuthContext";
 
 export default function BookingModal({ open, onClose, onBooked }) {
+  const { apiFetch } = useAuth();
   const [services, setServices] = useState([]);
   const [users, setUsers] = useState([]);
   const [resources, setResources] = useState([]);
@@ -34,10 +34,11 @@ export default function BookingModal({ open, onClose, onBooked }) {
 
   useEffect(() => {
     if (!open) return;
+    const safe = (r) => r.ok ? r.json() : [];
     Promise.all([
-      fetch(`${API}/services`).then((r) => r.json()),
-      fetch(`${API}/users`).then((r) => r.json()),
-      fetch(`${API}/resources`).then((r) => r.json()),
+      apiFetch("/api/services").then(safe),
+      apiFetch("/api/users").then(safe),
+      apiFetch("/api/resources").then(safe),
     ]).then(([s, u, res]) => {
       setServices(s);
       setUsers(u);
@@ -86,9 +87,8 @@ export default function BookingModal({ open, onClose, onBooked }) {
     setSubmitting(true);
     setError(null);
 
-    const res = await fetch(`${API}/appointments`, {
+    const res = await apiFetch("/api/appointments", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildPayload(override)),
     });
 

@@ -10,10 +10,10 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-
-const API = "http://localhost:8000/api";
+import { useAuth } from "@/context/AuthContext";
 
 export default function RuleBuilder({ onRuleCreated }) {
+  const { apiFetch } = useAuth();
   const [services, setServices] = useState([]);
   const [roles, setRoles] = useState([]);
   const [resources, setResources] = useState([]);
@@ -30,11 +30,12 @@ export default function RuleBuilder({ onRuleCreated }) {
   const [success, setSuccess] = useState(false);
 
   function loadData() {
+    const safe = (r) => r.ok ? r.json() : [];
     Promise.all([
-      fetch(`${API}/services`).then((r) => r.json()),
-      fetch(`${API}/roles`).then((r) => r.json()),
-      fetch(`${API}/resources`).then((r) => r.json()),
-      fetch(`${API}/rules`).then((r) => r.json()),
+      apiFetch("/api/services").then(safe),
+      apiFetch("/api/roles").then(safe),
+      apiFetch("/api/resources").then(safe),
+      apiFetch("/api/rules").then(safe),
     ]).then(([s, ro, res, rules]) => {
       setServices(s);
       setRoles(ro);
@@ -58,9 +59,8 @@ export default function RuleBuilder({ onRuleCreated }) {
     if (form.required_role_id) body.required_role_id = Number(form.required_role_id);
     if (form.required_resource_id) body.required_resource_id = Number(form.required_resource_id);
 
-    const res = await fetch(`${API}/rules`, {
+    const res = await apiFetch("/api/rules", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
 

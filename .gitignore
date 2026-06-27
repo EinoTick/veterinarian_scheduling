@@ -36,3 +36,7 @@ Thumbs.db
 
 # Node (root-level guard; frontend/.gitignore also covers this)
 node_modules/
+
+# Local dev scripts
+start.bat
+start.ps1
