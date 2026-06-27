@@ -12,23 +12,30 @@ import {
 
 export default function CreateUserModal({ open, onClose, onCreated }) {
   const { apiFetch, user: currentUser } = useAuth();
+  const isSysAdmin = currentUser?.system_role === "SYSTEM_ADMIN";
 
   const [clinicalRoles, setClinicalRoles] = useState([]);
+  const [clinics, setClinics] = useState([]);
   const [form, setForm] = useState({
-    name: "", email: "", password: "", system_role: "USER", role_id: "",
+    name: "", email: "", password: "", system_role: "USER", role_id: "", clinic_id: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     if (!open) return;
-    apiFetch("/api/roles")
-      .then((r) => (r.ok ? r.json() : []))
-      .then(setClinicalRoles);
-  }, [open, apiFetch]);
+    const safe = (r) => (r.ok ? r.json() : []);
+    Promise.all([
+      apiFetch("/api/roles").then(safe),
+      isSysAdmin ? apiFetch("/api/clinics").then(safe) : Promise.resolve([]),
+    ]).then(([roles, clinicList]) => {
+      setClinicalRoles(roles);
+      setClinics(clinicList);
+    });
+  }, [open, apiFetch, isSysAdmin]);
 
   function resetForm() {
-    setForm({ name: "", email: "", password: "", system_role: "USER", role_id: "" });
+    setForm({ name: "", email: "", password: "", system_role: "USER", role_id: "", clinic_id: "" });
     setError(null);
   }
 
@@ -37,9 +44,17 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
     onClose();
   }
 
+  const needsClinic = isSysAdmin && form.system_role !== "SYSTEM_ADMIN";
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
+
+    if (needsClinic && !form.clinic_id) {
+      setError("Please select a clinic for this user.");
+      return;
+    }
+
     setSubmitting(true);
 
     const body = {
@@ -48,12 +63,20 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
       password: form.password,
       system_role: form.system_role,
       role_id: form.role_id ? Number(form.role_id) : null,
+      clinic_id: form.clinic_id ? Number(form.clinic_id) : null,
     };
 
-    const res = await apiFetch("/api/users", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    let res;
+    try {
+      res = await apiFetch("/api/users", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    } catch {
+      setSubmitting(false);
+      setError("Network error — is the backend running?");
+      return;
+    }
 
     setSubmitting(false);
 
@@ -129,19 +152,40 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
               <Label>System Access</Label>
               <Select
                 value={form.system_role}
-                onValueChange={(v) => setForm((f) => ({ ...f, system_role: v }))}
+                onValueChange={(v) => setForm((f) => ({ ...f, system_role: v, clinic_id: "" }))}
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="USER">User</SelectItem>
                   <SelectItem value="CLINIC_ADMIN">Clinic Admin</SelectItem>
-                  {currentUser?.system_role === "SYSTEM_ADMIN" && (
+                  {isSysAdmin && (
                     <SelectItem value="SYSTEM_ADMIN">System Admin</SelectItem>
                   )}
                 </SelectContent>
               </Select>
             </div>
           </div>
+
+          {isSysAdmin && form.system_role !== "SYSTEM_ADMIN" && (
+            <div className="space-y-1">
+              <Label>
+                Clinic <span className="text-destructive">*</span>
+              </Label>
+              <Select
+                value={form.clinic_id}
+                onValueChange={(v) => setForm((f) => ({ ...f, clinic_id: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select clinic…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {clinics.map((c) => (
+                    <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 

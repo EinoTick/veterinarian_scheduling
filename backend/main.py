@@ -227,6 +227,14 @@ def create_user(
 
 # ── Reference data (auth-protected, clinic-scoped) ────────────────────────────
 
+@app.get("/api/clinics", response_model=List[ClinicOut])
+def list_clinics(
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return db.query(Clinic).all()
+
+
 @app.get("/api/roles", response_model=List[RoleOut])
 def list_roles(
     _: User = Depends(get_current_user),
@@ -328,6 +336,9 @@ def create_appointment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if current_user.clinic_id is None:
+        raise HTTPException(400, "System administrators must be associated with a clinic to book appointments.")
+
     service = db.get(Service, payload.service_id)
     if not service:
         raise HTTPException(404, "Service not found.")
@@ -363,22 +374,28 @@ def create_appointment(
         patient_name=payload.patient_name,
         status="scheduled",
     )
-    db.add(appt)
-    db.flush()
 
-    for alloc in transient_allocations:
-        alloc.appointment_id = appt.id
-        db.add(alloc)
+    try:
+        db.add(appt)
+        db.flush()
 
-    if payload.override and soft_violations and payload.overriding_user_id:
-        for v in soft_violations:
-            db.add(OverrideLog(
-                appointment_id=appt.id,
-                rule_id=v.rule_id,
-                overridden_by_user_id=payload.overriding_user_id,
-                timestamp=datetime.utcnow(),
-            ))
+        for alloc in transient_allocations:
+            alloc.appointment_id = appt.id
+            db.add(alloc)
 
-    db.commit()
+        if payload.override and soft_violations and payload.overriding_user_id:
+            for v in soft_violations:
+                db.add(OverrideLog(
+                    appointment_id=appt.id,
+                    rule_id=v.rule_id,
+                    overridden_by_user_id=payload.overriding_user_id,
+                    timestamp=datetime.utcnow(),
+                ))
+
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, detail=str(exc))
+
     db.refresh(appt)
     return AppointmentOut.model_validate(appt)

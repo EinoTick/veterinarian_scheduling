@@ -70,10 +70,17 @@ export default function CreateRuleModal({ open, onClose, onCreated }) {
     if (form.required_role_id) body.required_role_id = Number(form.required_role_id);
     if (form.required_resource_id) body.required_resource_id = Number(form.required_resource_id);
 
-    const res = await apiFetch("/api/rules", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    let res;
+    try {
+      res = await apiFetch("/api/rules", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    } catch {
+      setSubmitting(false);
+      setError("Network error — is the backend running?");
+      return;
+    }
 
     setSubmitting(false);
 

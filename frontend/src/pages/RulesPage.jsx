@@ -31,9 +31,9 @@ export default function RulesPage() {
 
     setLoadError(null);
     setRules(await rulesRes.json());
-    setServices(await servicesRes.then(safe));
-    setRoles(await rolesRes.then(safe));
-    setResources(await resourcesRes.then(safe));
+    setServices(servicesRes.ok ? await servicesRes.json() : []);
+    setRoles(rolesRes.ok ? await rolesRes.json() : []);
+    setResources(resourcesRes.ok ? await resourcesRes.json() : []);
   }, [apiFetch]);
 
   useEffect(() => { loadData(); }, [loadData]);

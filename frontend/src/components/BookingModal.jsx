@@ -87,10 +87,17 @@ export default function BookingModal({ open, onClose, onBooked }) {
     setSubmitting(true);
     setError(null);
 
-    const res = await apiFetch("/api/appointments", {
-      method: "POST",
-      body: JSON.stringify(buildPayload(override)),
-    });
+    let res;
+    try {
+      res = await apiFetch("/api/appointments", {
+        method: "POST",
+        body: JSON.stringify(buildPayload(override)),
+      });
+    } catch {
+      setSubmitting(false);
+      setError({ type: "generic", message: "Network error — is the backend running?" });
+      return;
+    }
 
     setSubmitting(false);
 

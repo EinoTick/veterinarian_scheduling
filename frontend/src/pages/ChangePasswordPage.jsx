@@ -29,13 +29,20 @@ export default function ChangePasswordPage() {
 
     setSubmitting(true);
 
-    const res = await apiFetch("/api/auth/change-password", {
-      method: "POST",
-      body: JSON.stringify({
-        current_password: form.current_password,
-        new_password: form.new_password,
-      }),
-    });
+    let res;
+    try {
+      res = await apiFetch("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          current_password: form.current_password,
+          new_password: form.new_password,
+        }),
+      });
+    } catch {
+      setSubmitting(false);
+      setError("Network error — is the backend running?");
+      return;
+    }
 
     setSubmitting(false);
 

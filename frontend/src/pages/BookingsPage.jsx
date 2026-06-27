@@ -34,7 +34,7 @@ export default function BookingsPage() {
 
     setLoadError(null);
     setAppointments(await apptsRes.json());
-    setServices(await servicesRes.then(safe));
+    setServices(servicesRes.ok ? await servicesRes.json() : []);
   }, [apiFetch]);
 
   useEffect(() => { loadData(); }, [loadData]);
