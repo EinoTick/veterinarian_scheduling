@@ -43,7 +43,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
       setServices(s);
       setUsers(u);
       setResources(res);
-    });
+    }).catch(() => {});
   }, [open]);
 
   function resetState() {

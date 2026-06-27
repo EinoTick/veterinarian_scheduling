@@ -16,13 +16,18 @@ export default function RulesPage() {
   const [modalOpen, setModalOpen] = useState(false);
 
   const loadData = useCallback(async () => {
-    const safe = (r) => (r.ok ? r.json() : []);
-    const [rulesRes, servicesRes, rolesRes, resourcesRes] = await Promise.all([
-      apiFetch("/api/rules"),
-      apiFetch("/api/services"),
-      apiFetch("/api/roles"),
-      apiFetch("/api/resources"),
-    ]);
+    let rulesRes, servicesRes, rolesRes, resourcesRes;
+    try {
+      [rulesRes, servicesRes, rolesRes, resourcesRes] = await Promise.all([
+        apiFetch("/api/rules"),
+        apiFetch("/api/services"),
+        apiFetch("/api/roles"),
+        apiFetch("/api/resources"),
+      ]);
+    } catch {
+      setLoadError("Failed to load rules.");
+      return;
+    }
 
     if (!rulesRes.ok) {
       setLoadError("Failed to load rules.");

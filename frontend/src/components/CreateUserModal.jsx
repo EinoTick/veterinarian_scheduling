@@ -31,7 +31,7 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
     ]).then(([roles, clinicList]) => {
       setClinicalRoles(roles);
       setClinics(clinicList);
-    });
+    }).catch(() => {});
   }, [open, apiFetch, isSysAdmin]);
 
   function resetForm() {

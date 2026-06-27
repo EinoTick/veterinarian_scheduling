@@ -38,7 +38,7 @@ export default function CreateRuleModal({ open, onClose, onCreated }) {
       setServices(s);
       setRoles(ro);
       setResources(res);
-    });
+    }).catch(() => {});
   }, [open, apiFetch]);
 
   function resetForm() {

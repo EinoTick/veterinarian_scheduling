@@ -19,7 +19,13 @@ export default function UsersPage() {
   const [modalOpen, setModalOpen] = useState(false);
 
   const loadUsers = useCallback(async () => {
-    const res = await apiFetch("/api/users");
+    let res;
+    try {
+      res = await apiFetch("/api/users");
+    } catch {
+      setLoadError("Failed to load users.");
+      return;
+    }
     if (!res.ok) {
       setLoadError("Failed to load users.");
       return;

@@ -21,11 +21,16 @@ export default function BookingsPage() {
   const [modalOpen, setModalOpen] = useState(false);
 
   const loadData = useCallback(async () => {
-    const safe = (r) => (r.ok ? r.json() : []);
-    const [apptsRes, servicesRes] = await Promise.all([
-      apiFetch("/api/appointments"),
-      apiFetch("/api/services"),
-    ]);
+    let apptsRes, servicesRes;
+    try {
+      [apptsRes, servicesRes] = await Promise.all([
+        apiFetch("/api/appointments"),
+        apiFetch("/api/services"),
+      ]);
+    } catch {
+      setLoadError("Failed to load appointments.");
+      return;
+    }
 
     if (!apptsRes.ok) {
       setLoadError("Failed to load appointments.");

@@ -178,8 +178,12 @@ def change_password(
 ):
     if not verify_password(payload.current_password, current_user.hashed_password):
         raise HTTPException(400, "Current password is incorrect.")
-    current_user.hashed_password = hash_password(payload.new_password)
-    db.commit()
+    try:
+        current_user.hashed_password = hash_password(payload.new_password)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, detail=str(exc))
     return {"detail": "Password updated."}
 
 
@@ -210,18 +214,23 @@ def create_user(
         else current_user.clinic_id
     )
 
-    user = User(
-        name=payload.name,
-        email=payload.email,
-        hashed_password=hash_password(payload.password),
-        system_role=payload.system_role,
-        role_id=payload.role_id,
-        clinic_id=target_clinic_id,
-        is_active=True,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        user = User(
+            name=payload.name,
+            email=payload.email,
+            hashed_password=hash_password(payload.password),
+            system_role=payload.system_role,
+            role_id=payload.role_id,
+            clinic_id=target_clinic_id,
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, detail=str(exc))
+
     return user
 
 
@@ -280,10 +289,18 @@ def create_rule(
     if payload.required_resource_id and not db.get(Resource, payload.required_resource_id):
         raise HTTPException(404, "Resource not found.")
 
-    rule = Rule(**payload.model_dump(), clinic_id=current_user.clinic_id)
-    db.add(rule)
-    db.commit()
-    db.refresh(rule)
+    if current_user.clinic_id is None:
+        raise HTTPException(400, "System administrators must be associated with a clinic to create rules.")
+
+    try:
+        rule = Rule(**payload.model_dump(), clinic_id=current_user.clinic_id)
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, detail=str(exc))
+
     return rule
 
 
