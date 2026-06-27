@@ -190,7 +190,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                       : "bg-muted text-muted-foreground border-transparent hover:border-muted-foreground"
                   } disabled:opacity-50`}
                 >
-                  {u.name} · {u.role.name}
+                  {u.name}{u.role ? ` · ${u.role.name}` : ""}
                 </button>
               ))}
             </div>
@@ -260,7 +260,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                   <SelectContent>
                     {users.map((u) => (
                       <SelectItem key={u.id} value={String(u.id)}>
-                        {u.name} · {u.role.name}
+                        {u.name}{u.role ? ` · ${u.role.name}` : ""}
                       </SelectItem>
                     ))}
                   </SelectContent>
