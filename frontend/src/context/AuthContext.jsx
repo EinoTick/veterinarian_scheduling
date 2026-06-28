@@ -5,34 +5,67 @@ const AuthContext = createContext(null);
 const TOKEN_KEY = "vc_token";
 const API = "http://localhost:8000";
 
-export function AuthProvider({ children }) {
-  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(!!localStorage.getItem(TOKEN_KEY));
+function isTokenExpired(token) {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    if (!payload.exp) return false;
+    return payload.exp * 1000 < Date.now();
+  } catch {
+    return true;
+  }
+}
 
-  // Fetch /me whenever the token changes
+function readStoredToken() {
+  const stored = localStorage.getItem(TOKEN_KEY);
+  if (!stored || isTokenExpired(stored)) {
+    if (stored) localStorage.removeItem(TOKEN_KEY);
+    return null;
+  }
+  return stored;
+}
+
+export function AuthProvider({ children }) {
+  const [token, setToken] = useState(() => readStoredToken());
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(() => !!readStoredToken());
+
   useEffect(() => {
     if (!token) {
       setUser(null);
       setLoading(false);
       return;
     }
+
+    const controller = new AbortController();
+    let active = true;
+
     setLoading(true);
     fetch(`${API}/api/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
     })
       .then((r) => {
         if (!r.ok) throw new Error("invalid token");
         return r.json();
       })
-      .then((u) => setUser(u))
-      .catch(() => {
-        // Token is stale or invalid — clear it
+      .then((u) => {
+        if (!active) return;
+        setUser(u);
+      })
+      .catch((err) => {
+        if (!active || err.name === "AbortError") return;
         localStorage.removeItem(TOKEN_KEY);
         setToken(null);
         setUser(null);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [token]);
 
   const login = useCallback(async (email, password) => {
@@ -57,9 +90,11 @@ export function AuthProvider({ children }) {
     setUser(null);
   }, []);
 
-  // Authenticated fetch helper — automatically attaches the Bearer token
   const apiFetch = useCallback(
     (path, options = {}) => {
+      if (!token) {
+        return Promise.reject(new Error("Not authenticated"));
+      }
       return fetch(`${API}${path}`, {
         ...options,
         headers: {

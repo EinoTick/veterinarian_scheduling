@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -7,8 +7,14 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!authLoading && user) {
+      navigate("/bookings", { replace: true });
+    }
+  }, [authLoading, user, navigate]);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -21,12 +27,20 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await login(email, password);
-      navigate("/", { replace: true });
+      navigate("/bookings", { replace: true });
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
+  }
+
+  if (authLoading || user) {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-muted-foreground text-sm">
+        Loading…
+      </div>
+    );
   }
 
   return (
