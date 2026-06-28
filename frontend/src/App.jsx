@@ -8,6 +8,7 @@ import UsersPage from "@/pages/UsersPage";
 import RulesPage from "@/pages/RulesPage";
 import ProfilePage from "@/pages/ProfilePage";
 import ChangePasswordPage from "@/pages/ChangePasswordPage";
+import MySchedule from "@/pages/MySchedule";
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
             <Route element={<AppLayout />}>
               <Route index element={<Navigate to="/bookings" replace />} />
               <Route path="bookings" element={<BookingsPage />} />
+              <Route path="schedule" element={<MySchedule />} />
               <Route path="profile" element={<ProfilePage />} />
               <Route path="change-password" element={<ChangePasswordPage />} />
               <Route element={<ProtectedRoute roles={["CLINIC_ADMIN", "SYSTEM_ADMIN"]} />}>

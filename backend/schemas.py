@@ -86,6 +86,9 @@ class RuleCreate(BaseModel):
     required_resource_id: Optional[int] = None
     is_hard_stop: bool = False
     description: str
+    duration_minutes: Optional[int] = None
+    start_offset_minutes: int = 0
+    presence_type: Optional[str] = None
 
     @model_validator(mode="after")
     def at_least_one_constraint(self):
@@ -101,6 +104,9 @@ class RuleOut(BaseModel):
     required_resource_id: Optional[int]
     is_hard_stop: bool
     description: str
+    duration_minutes: Optional[int] = None
+    start_offset_minutes: int = 0
+    presence_type: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -110,6 +116,9 @@ class RuleOut(BaseModel):
 class AllocationIn(BaseModel):
     user_id: Optional[int] = None
     resource_id: Optional[int] = None
+    presence_type: Optional[str] = None  # IN_ROOM | IN_BUILDING | REMOTE
+    start_offset_minutes: int = 0
+    duration_minutes: Optional[int] = None  # None = use service default
 
     @model_validator(mode="after")
     def exactly_one_set(self):
@@ -121,6 +130,7 @@ class AllocationIn(BaseModel):
 
 
 class AppointmentCreate(BaseModel):
+    clinic_id: Optional[int] = None  # required when current_user is SYSTEM_ADMIN
     service_id: int
     start_time: datetime
     client_name: str
@@ -128,6 +138,7 @@ class AppointmentCreate(BaseModel):
     allocations: List[AllocationIn] = []
     override: bool = False
     overriding_user_id: Optional[int] = None
+    override_double_booking: bool = False
 
 
 class AppointmentOut(BaseModel):
@@ -153,3 +164,16 @@ class ViolationDetail(BaseModel):
 class SoftStopResponse(BaseModel):
     detail: str = "soft_stop"
     violations: List[ViolationDetail]
+
+
+# ── Schedule ──────────────────────────────────────────────────────────────────
+
+class ScheduleEventOut(BaseModel):
+    allocation_id: int
+    appointment_id: int
+    start_time: datetime
+    end_time: datetime
+    presence_type: Optional[str] = None
+    client_name: str
+    patient_name: str
+    service_name: str

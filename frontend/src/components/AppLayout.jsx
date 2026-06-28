@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   CalendarDays,
+  CalendarRange,
   Users,
   ShieldCheck,
   UserCircle,
@@ -13,6 +14,7 @@ import {
 
 const NAV_ITEMS = [
   { to: "/bookings", label: "Bookings", icon: CalendarDays },
+  { to: "/schedule", label: "My Schedule", icon: CalendarRange },
   { to: "/users", label: "Users", icon: Users, adminOnly: true },
   { to: "/rules", label: "Rules", icon: ShieldCheck, adminOnly: true },
   { to: "/profile", label: "My Profile", icon: UserCircle },

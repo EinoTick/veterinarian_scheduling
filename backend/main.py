@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta
 from typing import List
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from auth import (
@@ -140,9 +141,29 @@ def seed_db(db: Session):
     db.commit()
 
 
+def run_migrations(db: Session):
+    """Idempotently add new columns to existing tables."""
+    conn = db.connection()
+    stmts = [
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS duration_minutes INTEGER",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS start_offset_minutes INTEGER DEFAULT 0",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS presence_type VARCHAR",
+        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS start_time TIMESTAMP",
+        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS end_time TIMESTAMP",
+        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS presence_type VARCHAR",
+    ]
+    for stmt in stmts:
+        try:
+            conn.execute(text(stmt))
+        except Exception:
+            pass
+    db.commit()
+
+
 @app.on_event("startup")
 def on_startup():
     with SessionLocal() as db:
+        run_migrations(db)
         seed_db(db)
 
 
@@ -336,6 +357,45 @@ def _evaluate_rules(service_id, allocations, db):
     return violations
 
 
+def _check_double_booking(allocations_in, appt_start, service_duration, db):
+    conflicts = []
+    for alloc_data in allocations_in:
+        offset = alloc_data.start_offset_minutes or 0
+        duration = alloc_data.duration_minutes or service_duration
+        alloc_start = appt_start + timedelta(minutes=offset)
+        alloc_end = alloc_start + timedelta(minutes=duration)
+
+        if alloc_data.user_id:
+            overlap = db.query(AppointmentAllocation).filter(
+                AppointmentAllocation.user_id == alloc_data.user_id,
+                AppointmentAllocation.start_time.isnot(None),
+                AppointmentAllocation.start_time < alloc_end,
+                AppointmentAllocation.end_time > alloc_start,
+            ).first()
+            if overlap:
+                user = db.get(User, alloc_data.user_id)
+                conflicts.append({
+                    "entity": user.name if user else f"User #{alloc_data.user_id}",
+                    "entity_type": "user",
+                })
+
+        if alloc_data.resource_id:
+            overlap = db.query(AppointmentAllocation).filter(
+                AppointmentAllocation.resource_id == alloc_data.resource_id,
+                AppointmentAllocation.start_time.isnot(None),
+                AppointmentAllocation.start_time < alloc_end,
+                AppointmentAllocation.end_time > alloc_start,
+            ).first()
+            if overlap:
+                resource = db.get(Resource, alloc_data.resource_id)
+                conflicts.append({
+                    "entity": resource.name if resource else f"Resource #{alloc_data.resource_id}",
+                    "entity_type": "resource",
+                })
+
+    return conflicts
+
+
 # ── Appointments ──────────────────────────────────────────────────────────────
 
 @app.get("/api/appointments", response_model=List[AppointmentOut])
@@ -353,8 +413,14 @@ def create_appointment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if current_user.clinic_id is None:
-        raise HTTPException(400, "System administrators must be associated with a clinic to book appointments.")
+    if current_user.system_role == "SYSTEM_ADMIN":
+        if not payload.clinic_id:
+            raise HTTPException(400, "System administrators must provide a clinic_id.")
+        clinic_id = payload.clinic_id
+    else:
+        clinic_id = current_user.clinic_id
+        if clinic_id is None:
+            raise HTTPException(400, "User is not associated with a clinic.")
 
     service = db.get(Service, payload.service_id)
     if not service:
@@ -381,9 +447,22 @@ def create_appointment(
             "violations": [v.model_dump() for v in soft_violations],
         })
 
+    if not payload.override_double_booking:
+        conflicts = _check_double_booking(
+            payload.allocations,
+            payload.start_time,
+            service.default_duration_minutes,
+            db,
+        )
+        if conflicts:
+            raise HTTPException(400, detail={
+                "type": "double_booking",
+                "conflicts": conflicts,
+            })
+
     end_time = payload.start_time + timedelta(minutes=service.default_duration_minutes)
     appt = Appointment(
-        clinic_id=current_user.clinic_id,
+        clinic_id=clinic_id,
         service_id=payload.service_id,
         start_time=payload.start_time,
         end_time=end_time,
@@ -396,8 +475,13 @@ def create_appointment(
         db.add(appt)
         db.flush()
 
-        for alloc in transient_allocations:
+        for alloc_data, alloc in zip(payload.allocations, transient_allocations):
+            offset = alloc_data.start_offset_minutes or 0
+            duration = alloc_data.duration_minutes or service.default_duration_minutes
             alloc.appointment_id = appt.id
+            alloc.start_time = payload.start_time + timedelta(minutes=offset)
+            alloc.end_time = alloc.start_time + timedelta(minutes=duration)
+            alloc.presence_type = alloc_data.presence_type
             db.add(alloc)
 
         if payload.override and soft_violations and payload.overriding_user_id:
@@ -416,3 +500,48 @@ def create_appointment(
 
     db.refresh(appt)
     return AppointmentOut.model_validate(appt)
+
+
+@app.get("/api/users/{user_id}/schedule")
+def get_user_schedule(
+    user_id: int,
+    start: datetime = Query(...),
+    end: datetime = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.system_role == "USER" and current_user.id != user_id:
+        raise HTTPException(403, "Access denied.")
+
+    # Normalize to naive datetimes since the DB stores without TZ
+    start_naive = start.replace(tzinfo=None)
+    end_naive = end.replace(tzinfo=None)
+
+    allocations = (
+        db.query(AppointmentAllocation)
+        .join(Appointment)
+        .filter(
+            AppointmentAllocation.user_id == user_id,
+            AppointmentAllocation.start_time.isnot(None),
+            AppointmentAllocation.start_time < end_naive,
+            AppointmentAllocation.end_time > start_naive,
+        )
+        .all()
+    )
+
+    result = []
+    for alloc in allocations:
+        appt = alloc.appointment
+        service = db.get(Service, appt.service_id)
+        result.append({
+            "allocation_id": alloc.id,
+            "appointment_id": appt.id,
+            "start_time": alloc.start_time.isoformat(),
+            "end_time": alloc.end_time.isoformat(),
+            "presence_type": alloc.presence_type,
+            "client_name": appt.client_name,
+            "patient_name": appt.patient_name,
+            "service_name": service.name if service else "Unknown",
+        })
+
+    return result

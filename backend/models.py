@@ -94,6 +94,9 @@ class Rule(Base):
     required_resource_id = Column(Integer, ForeignKey("resources.id"), nullable=True)
     is_hard_stop = Column(Boolean, default=False)
     description = Column(String, nullable=False)
+    duration_minutes = Column(Integer, nullable=True)
+    start_offset_minutes = Column(Integer, nullable=False, default=0)
+    presence_type = Column(String, nullable=True)  # IN_ROOM | IN_BUILDING | REMOTE
 
     clinic = relationship("Clinic", back_populates="rules")
     service = relationship("Service", back_populates="rules")
@@ -131,6 +134,9 @@ class AppointmentAllocation(Base):
     appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     resource_id = Column(Integer, ForeignKey("resources.id"), nullable=True)
+    start_time = Column(DateTime, nullable=True)
+    end_time = Column(DateTime, nullable=True)
+    presence_type = Column(String, nullable=True)  # IN_ROOM | IN_BUILDING | REMOTE
 
     appointment = relationship("Appointment", back_populates="allocations")
     user = relationship("User", back_populates="allocations")
