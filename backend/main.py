@@ -545,3 +545,49 @@ def get_user_schedule(
         })
 
     return result
+
+
+@app.get("/api/resources/{resource_id}/schedule")
+def get_resource_schedule(
+    resource_id: int,
+    start: datetime = Query(...),
+    end: datetime = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    resource = db.get(Resource, resource_id)
+    if not resource:
+        raise HTTPException(404, "Resource not found.")
+    if current_user.system_role != "SYSTEM_ADMIN" and resource.clinic_id != current_user.clinic_id:
+        raise HTTPException(403, "Access denied.")
+
+    start_naive = start.replace(tzinfo=None)
+    end_naive = end.replace(tzinfo=None)
+
+    allocations = (
+        db.query(AppointmentAllocation)
+        .join(Appointment)
+        .filter(
+            AppointmentAllocation.resource_id == resource_id,
+            AppointmentAllocation.start_time.isnot(None),
+            AppointmentAllocation.start_time < end_naive,
+            AppointmentAllocation.end_time > start_naive,
+        )
+        .all()
+    )
+
+    result = []
+    for alloc in allocations:
+        appt = alloc.appointment
+        service = db.get(Service, appt.service_id)
+        result.append({
+            "allocation_id": alloc.id,
+            "appointment_id": appt.id,
+            "start_time": alloc.start_time.isoformat(),
+            "end_time": alloc.end_time.isoformat(),
+            "client_name": appt.client_name,
+            "patient_name": appt.patient_name,
+            "service_name": service.name if service else "Unknown",
+        })
+
+    return result

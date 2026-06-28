@@ -25,7 +25,7 @@ const EMPTY_FORM = {
   client_name: "",
   patient_name: "",
   staff_allocations: [],
-  resource_ids: [],
+  resource_allocations: [],
 };
 
 export default function BookingModal({ open, onClose, onBooked }) {
@@ -104,13 +104,29 @@ export default function BookingModal({ open, onClose, onBooked }) {
     });
   }
 
-  function toggleResource(id) {
+  function addResourceRow() {
     setForm((f) => ({
       ...f,
-      resource_ids: f.resource_ids.includes(id)
-        ? f.resource_ids.filter((x) => x !== id)
-        : [...f.resource_ids, id],
+      resource_allocations: [
+        ...f.resource_allocations,
+        { resource_id: "", start_offset_minutes: 0, duration_minutes: "" },
+      ],
     }));
+  }
+
+  function removeResourceRow(idx) {
+    setForm((f) => ({
+      ...f,
+      resource_allocations: f.resource_allocations.filter((_, i) => i !== idx),
+    }));
+  }
+
+  function updateResourceRow(idx, field, value) {
+    setForm((f) => {
+      const rows = [...f.resource_allocations];
+      rows[idx] = { ...rows[idx], [field]: value };
+      return { ...f, resource_allocations: rows };
+    });
   }
 
   function buildPayload({ overrideDoubleBooking = false } = {}) {
@@ -130,7 +146,13 @@ export default function BookingModal({ open, onClose, onBooked }) {
             start_offset_minutes: Number(a.start_offset_minutes) || 0,
             duration_minutes: a.duration_minutes !== "" ? Number(a.duration_minutes) : null,
           })),
-        ...form.resource_ids.map((id) => ({ resource_id: id })),
+        ...form.resource_allocations
+          .filter((a) => a.resource_id)
+          .map((a) => ({
+            resource_id: Number(a.resource_id),
+            start_offset_minutes: Number(a.start_offset_minutes) || 0,
+            duration_minutes: a.duration_minutes !== "" ? Number(a.duration_minutes) : null,
+          })),
       ],
       override: softOverrideActive,
       overriding_user_id: softOverrideActive ? Number(overridingUserId) : null,
@@ -396,26 +418,91 @@ export default function BookingModal({ open, onClose, onBooked }) {
             )}
           </div>
 
-          {/* Resources */}
-          <div className="space-y-1">
-            <Label>Assign Resources</Label>
-            <div className="flex flex-wrap gap-2 rounded-md border p-2 min-h-[40px]">
-              {resources.map((r) => (
-                <button
-                  key={r.id}
-                  type="button"
-                  disabled={formLocked}
-                  onClick={() => toggleResource(r.id)}
-                  className={`rounded px-2 py-0.5 text-xs border transition-colors ${
-                    form.resource_ids.includes(r.id)
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-muted text-muted-foreground border-transparent hover:border-muted-foreground"
-                  } disabled:opacity-50`}
-                >
-                  {r.name} ({r.resource_type})
-                </button>
-              ))}
+          {/* Resource Allocations */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Resource Allocations</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addResourceRow}
+                disabled={formLocked}
+                className="h-7 gap-1 text-xs"
+              >
+                <Plus className="h-3 w-3" /> Add Resource
+              </Button>
             </div>
+
+            {form.resource_allocations.length === 0 ? (
+              <p className="text-xs text-muted-foreground rounded-md border border-dashed p-2 text-center">
+                No resources added — click "Add Resource" to assign rooms or equipment.
+              </p>
+            ) : (
+              <>
+                <div className="flex gap-2 px-2 text-xs text-muted-foreground">
+                  <div className="flex-1">Room / Equipment</div>
+                  <div className="w-14 text-center" title="Minutes into appointment when needed">Offset</div>
+                  <div className="w-14 text-center" title="How many minutes needed (blank = full appointment)">Dur.</div>
+                  <div className="w-8" />
+                </div>
+                <div className="space-y-1.5">
+                  {form.resource_allocations.map((row, idx) => (
+                    <div
+                      key={idx}
+                      className="flex gap-2 items-center rounded-md border bg-muted/30 px-2 py-1.5"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <Select
+                          value={row.resource_id}
+                          onValueChange={(v) => updateResourceRow(idx, "resource_id", v)}
+                          disabled={formLocked}
+                        >
+                          <SelectTrigger className="h-7 text-xs">
+                            <SelectValue placeholder="Select resource…" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {resources.map((r) => (
+                              <SelectItem key={r.id} value={String(r.id)}>
+                                {r.name} ({r.resource_type})
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        value={row.start_offset_minutes}
+                        onChange={(e) => updateResourceRow(idx, "start_offset_minutes", e.target.value)}
+                        disabled={formLocked}
+                        className="h-7 w-14 text-xs text-center"
+                      />
+                      <Input
+                        type="number"
+                        min="1"
+                        placeholder="Full"
+                        value={row.duration_minutes}
+                        onChange={(e) => updateResourceRow(idx, "duration_minutes", e.target.value)}
+                        disabled={formLocked}
+                        className="h-7 w-14 text-xs text-center"
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => removeResourceRow(idx)}
+                        disabled={formLocked}
+                        className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Hard stop */}

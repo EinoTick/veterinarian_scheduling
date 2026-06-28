@@ -74,6 +74,7 @@ export default function MySchedule() {
           events={events}
           datesSet={(dateInfo) => fetchSchedule(dateInfo.startStr, dateInfo.endStr)}
           height="auto"
+          firstDay={1}
           slotMinTime="07:00:00"
           slotMaxTime="20:00:00"
           nowIndicator={true}

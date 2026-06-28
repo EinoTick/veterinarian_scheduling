@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import {
   CalendarDays,
   CalendarRange,
+  DoorOpen,
   Users,
   ShieldCheck,
   UserCircle,
@@ -15,6 +16,7 @@ import {
 const NAV_ITEMS = [
   { to: "/bookings", label: "Bookings", icon: CalendarDays },
   { to: "/schedule", label: "My Schedule", icon: CalendarRange },
+  { to: "/resource-schedule", label: "Rooms & Equipment", icon: DoorOpen },
   { to: "/users", label: "Users", icon: Users, adminOnly: true },
   { to: "/rules", label: "Rules", icon: ShieldCheck, adminOnly: true },
   { to: "/profile", label: "My Profile", icon: UserCircle },
