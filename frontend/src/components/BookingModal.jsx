@@ -36,6 +36,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const [users, setUsers] = useState([]);
   const [resources, setResources] = useState([]);
   const [clinics, setClinics] = useState([]);
+  const [rules, setRules] = useState([]);
 
   const [form, setForm] = useState(EMPTY_FORM);
   const [softViolations, setSoftViolations] = useState(null);
@@ -51,13 +52,15 @@ export default function BookingModal({ open, onClose, onBooked }) {
       apiFetch("/api/services").then(safe),
       apiFetch("/api/users").then(safe),
       apiFetch("/api/resources").then(safe),
+      apiFetch("/api/rules").then(safe),
     ];
     if (isSystemAdmin) fetches.push(apiFetch("/api/clinics").then(safe));
     Promise.all(fetches)
-      .then(([s, u, res, cl]) => {
+      .then(([s, u, res, r, cl]) => {
         setServices(s);
         setUsers(u);
         setResources(res);
+        setRules(r);
         if (cl) setClinics(cl);
       })
       .catch(() => {});
@@ -231,6 +234,32 @@ export default function BookingModal({ open, onClose, onBooked }) {
               </SelectContent>
             </Select>
           </div>
+
+          {/* Service requirements */}
+          {form.service_id && (() => {
+            const serviceRules = rules.filter((r) => r.service_id === Number(form.service_id));
+            if (!serviceRules.length) return null;
+            return (
+              <div className="rounded-md border bg-muted/40 px-3 py-2 space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Requirements for this service
+                </p>
+                {serviceRules.map((r) => (
+                  <div key={r.id} className="flex items-start gap-2">
+                    <Badge
+                      variant="outline"
+                      className={r.is_hard_stop
+                        ? "border-destructive text-destructive shrink-0"
+                        : "border-amber-400 text-amber-700 shrink-0"}
+                    >
+                      {r.is_hard_stop ? "Required" : "Recommended"}
+                    </Badge>
+                    <p className="text-xs text-foreground leading-tight">{r.description}</p>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
 
           {/* Start Time */}
           <div className="space-y-1">
