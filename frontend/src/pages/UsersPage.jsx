@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import CreateUserModal from "@/components/CreateUserModal";
+import UserScheduleDialog from "@/components/UserScheduleDialog";
 import { Plus } from "lucide-react";
 
 const ROLE_BADGE = {
@@ -17,6 +18,7 @@ export default function UsersPage() {
   const [users, setUsers] = useState([]);
   const [loadError, setLoadError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [scheduleUser, setScheduleUser] = useState(null);
 
   const loadUsers = useCallback(async () => {
     let res;
@@ -41,7 +43,9 @@ export default function UsersPage() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Users</h2>
-          <p className="text-sm text-muted-foreground">Manage clinic staff</p>
+          <p className="text-sm text-muted-foreground">
+            Manage clinic staff. Click a row to view their schedule.
+          </p>
         </div>
         <Button onClick={() => setModalOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
@@ -76,7 +80,11 @@ export default function UsersPage() {
                 </thead>
                 <tbody>
                   {users.map((u) => (
-                    <tr key={u.id} className="border-b last:border-0">
+                    <tr
+                      key={u.id}
+                      onClick={() => setScheduleUser(u)}
+                      className="border-b last:border-0 cursor-pointer hover:bg-muted/50 transition-colors"
+                    >
                       <td className="py-2 pr-4 font-medium">{u.name}</td>
                       <td className="py-2 pr-4 text-muted-foreground">{u.email}</td>
                       <td className="py-2 pr-4">{u.role?.name ?? "—"}</td>
@@ -98,6 +106,12 @@ export default function UsersPage() {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         onCreated={loadUsers}
+      />
+
+      <UserScheduleDialog
+        user={scheduleUser}
+        open={!!scheduleUser}
+        onClose={() => setScheduleUser(null)}
       />
     </div>
   );
