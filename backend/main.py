@@ -1,35 +1,64 @@
 from datetime import datetime, timedelta
 from typing import List, Optional
+import os
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from auth import (
-    clinic_filter, create_access_token, get_current_user,
-    hash_password, require_clinic_admin, require_system_admin, verify_password,
+    REFRESH_COOKIE,
+    clear_auth_cookies,
+    clinic_filter,
+    consume_refresh_token,
+    get_current_user,
+    hash_password,
+    issue_session,
+    lookup_refresh_token,
+    require_clinic_admin,
+    require_system_admin,
+    revoke_all_refresh_tokens,
+    revoke_refresh_token,
+    run_dummy_password_check,
+    verify_password,
 )
 from database import SessionLocal, engine, get_db
+from login_guard import (
+    check_login_allowed,
+    record_login_attempt,
+    record_login_failure,
+    record_login_success,
+)
 from models import (
     Appointment, AppointmentAllocation, Base, Client, Clinic, OverrideLog,
     Patient, Resource, Role, Rule, Service, User,
 )
 from schemas import (
     AppointmentCreate, AppointmentOut, AppointmentUpdate, AppointmentValidateOut,
-    ClinicOut, PasswordChange, ResourceOut, RoleOut, RuleCreate, RuleOut, RuleUpdate,
-    ServiceOut, SoftStopResponse, Token, UserCreate, UserOut, ViolationDetail,
+    AuthSessionOut, ClinicOut, PasswordChange, ResourceOut, RoleOut, RuleCreate,
+    RuleOut, RuleUpdate, ServiceOut, SoftStopResponse, UserCreate, UserOut,
+    ViolationDetail,
 )
 from catalog_routes import router as catalog_router
 
 app = FastAPI(title="VetClinic Scheduler")
 
+_cors_origins = [
+    o.strip()
+    for o in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 app.include_router(catalog_router)
@@ -274,21 +303,138 @@ def on_startup():
 
 # ── Auth endpoints ────────────────────────────────────────────────────────────
 
-@app.post("/api/auth/token", response_model=Token)
-def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == form.username).first()
-    if not user or not verify_password(form.password, user.hashed_password):
+_TRUST_PROXY = os.getenv("TRUST_PROXY", "false").lower() in ("1", "true", "yes")
+
+
+def _client_ip(request: Request) -> str:
+    # Only honor X-Forwarded-For when explicitly behind a trusted reverse proxy.
+    # Otherwise clients can spoof the header and bypass per-IP rate limits.
+    if _TRUST_PROXY:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip() or "unknown"
+    if request.client:
+        return request.client.host or "unknown"
+    return "unknown"
+
+
+@app.post("/api/auth/token", response_model=AuthSessionOut)
+def login(
+    request: Request,
+    response: Response,
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    ip = _client_ip(request)
+    email = form.username or ""
+    check_login_allowed(ip, email)
+    record_login_attempt(ip)
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        run_dummy_password_check(form.password)
+        record_login_failure(email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    token = create_access_token({
-        "sub": str(user.id),
-        "system_role": user.system_role,
-        "clinic_id": user.clinic_id,
-    })
-    return {"access_token": token, "token_type": "bearer"}
+
+    if not verify_password(form.password, user.hashed_password):
+        record_login_failure(email)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        # Valid credentials, disabled account — same client message, no lockout bump.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    record_login_success(email)
+    issue_session(
+        response,
+        db,
+        user,
+        user_agent=request.headers.get("user-agent"),
+    )
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        clear_auth_cookies(response)
+        raise HTTPException(500, detail=str(exc))
+    return AuthSessionOut(authenticated=True)
+
+
+@app.post("/api/auth/refresh", response_model=AuthSessionOut)
+def refresh_session(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    raw = request.cookies.get(REFRESH_COOKIE)
+    row, consume_status = consume_refresh_token(db, raw)
+    if consume_status != "ok" or row is None:
+        try:
+            db.commit()  # persist reuse-triggered mass revoke, if any
+        except Exception:
+            db.rollback()
+        clear_auth_cookies(response)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please sign in again.",
+        )
+
+    user = db.get(User, row.user_id)
+    if not user or not user.is_active:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        clear_auth_cookies(response)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please sign in again.",
+        )
+
+    issue_session(
+        response,
+        db,
+        user,
+        user_agent=request.headers.get("user-agent"),
+    )
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        clear_auth_cookies(response)
+        raise HTTPException(500, detail=str(exc))
+    return AuthSessionOut(authenticated=True)
+
+
+@app.post("/api/auth/logout", response_model=AuthSessionOut)
+def logout(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    raw = request.cookies.get(REFRESH_COOKIE)
+    if raw:
+        row = lookup_refresh_token(db, raw)
+        if row:
+            revoke_refresh_token(row)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+    clear_auth_cookies(response)
+    return AuthSessionOut(authenticated=False)
 
 
 @app.get("/api/auth/me", response_model=UserOut)
@@ -298,6 +444,7 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 @app.post("/api/auth/change-password")
 def change_password(
+    response: Response,
     payload: PasswordChange,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -306,11 +453,15 @@ def change_password(
         raise HTTPException(400, "Current password is incorrect.")
     try:
         current_user.hashed_password = hash_password(payload.new_password)
+        # Invalidate every refresh session, then mint a fresh one for this browser.
+        revoke_all_refresh_tokens(db, current_user.id)
+        issue_session(response, db, current_user)
         db.commit()
     except Exception as exc:
         db.rollback()
+        clear_auth_cookies(response)
         raise HTTPException(500, detail=str(exc))
-    return {"detail": "Password updated."}
+    return {"ok": True}
 
 
 # ── User management (CLINIC_ADMIN+) ──────────────────────────────────────────

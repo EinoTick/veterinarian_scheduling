@@ -79,6 +79,28 @@ class User(Base, TimestampMixin):
     override_logs = relationship(
         "OverrideLog", back_populates="overridden_by_user", foreign_keys="OverrideLog.overridden_by_user_id"
     )
+    refresh_tokens = relationship(
+        "RefreshToken", back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class RefreshToken(Base):
+    """
+    Server-side refresh tokens. Only a SHA-256 hash is stored so a DB leak
+    does not immediately yield usable session credentials. Logout / password
+    change sets revoked_at, which invalidates the cookie immediately.
+    """
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    user_agent = Column(String, nullable=True)
+
+    user = relationship("User", back_populates="refresh_tokens")
 
 
 class Resource(Base, AuditMixin):

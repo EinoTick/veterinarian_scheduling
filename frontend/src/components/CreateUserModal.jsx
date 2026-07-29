@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { validatePassword, PASSWORD_HINT } from "@/lib/password";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -52,6 +53,12 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
 
     if (needsClinic && !form.clinic_id) {
       setError("Please select a clinic for this user.");
+      return;
+    }
+
+    const pwError = validatePassword(form.password);
+    if (pwError) {
+      setError(pwError);
       return;
     }
 
@@ -127,9 +134,11 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
               type="password"
               value={form.password}
               onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-              placeholder="They should change this on first login"
+              placeholder="Min. 8 chars, letter + number"
               required
+              minLength={8}
             />
+            <p className="text-xs text-muted-foreground">{PASSWORD_HINT}</p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">

@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session, joinedload
 
-from auth import clinic_filter, get_current_user, hash_password, require_clinic_admin
+from auth import clinic_filter, get_current_user, hash_password, require_clinic_admin, revoke_all_refresh_tokens
 from database import get_db
 from models import Client, Patient, Resource, Role, Service, User
 from schemas import (
@@ -82,10 +82,12 @@ def update_user(
         raise HTTPException(400, "You cannot deactivate your own account.")
     if data.pop("clear_role_id", False):
         user.role_id = None
+    password_changed = False
     if "password" in data:
         pwd = data.pop("password")
         if pwd:
             user.hashed_password = hash_password(pwd)
+            password_changed = True
     for key, value in data.items():
         setattr(user, key, value)
 
@@ -98,6 +100,8 @@ def update_user(
 
     _stamp_update(user)
     try:
+        if password_changed:
+            revoke_all_refresh_tokens(db, user.id)
         db.commit()
         db.refresh(user)
     except Exception as exc:

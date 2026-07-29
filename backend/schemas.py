@@ -1,19 +1,31 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+from password_policy import validate_password_strength
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 class Token(BaseModel):
+    """Legacy shape kept for OpenAPI tooling; cookie sessions are preferred."""
     access_token: str
     token_type: str = "bearer"
+
+
+class AuthSessionOut(BaseModel):
+    authenticated: bool = True
 
 
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _password_policy(cls, v: str) -> str:
+        return validate_password_strength(v)
 
 
 # ── Clinics ───────────────────────────────────────────────────────────────────
@@ -66,6 +78,11 @@ class UserCreate(BaseModel):
     role_id: Optional[int] = None
     clinic_id: Optional[int] = None
 
+    @field_validator("password")
+    @classmethod
+    def _password_policy(cls, v: str) -> str:
+        return validate_password_strength(v)
+
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -76,6 +93,13 @@ class UserUpdate(BaseModel):
     clear_role_id: bool = False
     # Admin password reset (optional)
     password: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def _password_policy(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return v
+        return validate_password_strength(v)
 
 
 class UserOut(BaseModel):

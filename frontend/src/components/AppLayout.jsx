@@ -55,8 +55,8 @@ export default function AppLayout() {
   const isAdmin =
     user?.system_role === "CLINIC_ADMIN" || user?.system_role === "SYSTEM_ADMIN";
 
-  function handleLogout() {
-    logout();
+  async function handleLogout() {
+    await logout();
     navigate("/login", { replace: true });
   }
 
