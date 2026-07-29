@@ -66,7 +66,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
     const safe = (r) => (r.ok ? r.json() : []);
     Promise.all([
       apiFetch(`/api/services`).then(safe),
-      apiFetch(`/api/users`).then(safe),
+      apiFetch(`/api/staff`).then(safe),
       apiFetch(`/api/resources`).then(safe),
       apiFetch(`/api/rules`).then(safe),
     ]).then(([s, u, res, r]) => {
@@ -74,7 +74,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
         const cid = Number(form.clinic_id);
         setServices(s.filter((x) => x.clinic_id === cid));
         setResources(res.filter((x) => x.clinic_id === cid));
-        // Users list from /api/users is already admin-scoped; filter by clinic_id field
         setUsers(u.filter((x) => x.clinic_id === cid));
         setRules(r.filter((x) => x.clinic_id === cid));
       } else {
@@ -152,6 +151,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
 
   function buildPayload({ overrideDoubleBooking = false } = {}) {
     const softOverrideActive = softViolations !== null && !!overridingUserId;
+    const doubleOverrideActive = overrideDoubleBooking && !!overridingUserId;
     return {
       ...(isSystemAdmin && form.clinic_id ? { clinic_id: Number(form.clinic_id) } : {}),
       service_id: Number(form.service_id),
@@ -176,8 +176,9 @@ export default function BookingModal({ open, onClose, onBooked }) {
           })),
       ],
       override: softOverrideActive,
-      overriding_user_id: softOverrideActive ? Number(overridingUserId) : null,
-      override_double_booking: overrideDoubleBooking,
+      overriding_user_id:
+        softOverrideActive || doubleOverrideActive ? Number(overridingUserId) : null,
+      override_double_booking: doubleOverrideActive,
     };
   }
 
@@ -631,7 +632,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
 
           {/* Double-booking warning */}
           {hasDoubleBooking && (
-            <div className="rounded-md border-2 border-red-500 bg-red-50 p-3 space-y-2">
+            <div className="rounded-md border-2 border-red-500 bg-red-50 p-3 space-y-3">
               <div className="flex items-center gap-2 text-red-700 font-bold">
                 <AlertTriangle className="h-4 w-4" />
                 Double-Booking Conflict Detected
@@ -641,6 +642,23 @@ export default function BookingModal({ open, onClose, onBooked }) {
                   <strong>{c.entity}</strong> is already scheduled during this time.
                 </p>
               ))}
+              <div className="space-y-1 pt-1">
+                <Label className="text-red-700">
+                  Who is authorizing this override? (required for audit log)
+                </Label>
+                <Select value={overridingUserId} onValueChange={setOverridingUserId}>
+                  <SelectTrigger className="border-red-400">
+                    <SelectValue placeholder="Select authorizing staff member…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {users.map((u) => (
+                      <SelectItem key={u.id} value={String(u.id)}>
+                        {u.name}{u.role ? ` · ${u.role.name}` : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           )}
 
@@ -725,7 +743,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
               <Button
                 variant="destructive"
                 onClick={() => submitBooking({ overrideDoubleBooking: true })}
-                disabled={submitting}
+                disabled={submitting || !overridingUserId}
               >
                 {submitting ? "Saving…" : "Override & Book Anyway"}
               </Button>

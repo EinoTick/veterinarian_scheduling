@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,14 +13,15 @@ from auth import (
 )
 from database import SessionLocal, engine, get_db
 from models import (
-    Appointment, AppointmentAllocation, Base, Clinic, OverrideLog,
-    Resource, Role, Rule, Service, User,
+    Appointment, AppointmentAllocation, Base, Client, Clinic, OverrideLog,
+    Patient, Resource, Role, Rule, Service, User,
 )
 from schemas import (
-    AppointmentCreate, AppointmentOut, AppointmentValidateOut, ClinicOut, PasswordChange,
-    ResourceOut, RoleOut, RuleCreate, RuleOut, RuleUpdate, ServiceOut,
-    SoftStopResponse, Token, UserCreate, UserOut, ViolationDetail,
+    AppointmentCreate, AppointmentOut, AppointmentUpdate, AppointmentValidateOut,
+    ClinicOut, PasswordChange, ResourceOut, RoleOut, RuleCreate, RuleOut, RuleUpdate,
+    ServiceOut, SoftStopResponse, Token, UserCreate, UserOut, ViolationDetail,
 )
+from catalog_routes import router as catalog_router
 
 app = FastAPI(title="VetClinic Scheduler")
 
@@ -30,6 +31,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(catalog_router)
 
 Base.metadata.create_all(bind=engine)
 
@@ -45,11 +48,16 @@ def seed_db(db: Session):
     db.add(clinic)
     db.flush()
 
-    # Clinical roles
-    vet = Role(name="Veterinarian", can_prescribe=True)
-    tech = Role(name="Licensed Tech", can_prescribe=False)
-    assistant = Role(name="Assistant", can_prescribe=False)
+    # Clinical roles (global catalog — clinic_id NULL)
+    vet = Role(name="Veterinarian", can_prescribe=True, clinic_id=None)
+    tech = Role(name="Licensed Tech", can_prescribe=False, clinic_id=None)
+    assistant = Role(name="Assistant", can_prescribe=False, clinic_id=None)
     db.add_all([vet, tech, assistant])
+    db.flush()
+
+    # Clinic-specific example role
+    groomer = Role(name="Groomer", can_prescribe=False, clinic_id=clinic.id)
+    db.add(groomer)
     db.flush()
 
     # System users
@@ -154,9 +162,10 @@ def seed_db(db: Session):
 
 
 def run_migrations(db: Session):
-    """Idempotently add new columns to existing tables."""
+    """Idempotently add new columns / tables to existing databases."""
     conn = db.connection()
     stmts = [
+        # Prior rule/resource/allocation columns
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS duration_minutes INTEGER",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS start_offset_minutes INTEGER DEFAULT 0",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS presence_type VARCHAR",
@@ -168,17 +177,85 @@ def run_migrations(db: Session):
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS active_weekdays JSON",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS active_start_time VARCHAR",
         "ALTER TABLE rules ADD COLUMN IF NOT EXISTS active_end_time VARCHAR",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
         "ALTER TABLE resources ADD COLUMN IF NOT EXISTS category VARCHAR",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
         "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS start_time TIMESTAMP",
         "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS end_time TIMESTAMP",
         "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS presence_type VARCHAR",
-        # Backfill categories on seed-named resources (safe no-ops if names differ)
+        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS client_id INTEGER",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS patient_id INTEGER",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
+        "ALTER TABLE clinics ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE clinics ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS clinic_id INTEGER",
+        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+        "ALTER TABLE override_logs ALTER COLUMN rule_id DROP NOT NULL",
+        "ALTER TABLE override_logs ADD COLUMN IF NOT EXISTS override_type VARCHAR DEFAULT 'soft_stop'",
+        "ALTER TABLE override_logs ADD COLUMN IF NOT EXISTS notes VARCHAR",
+        # Drop global unique on roles.name if present (name is now scoped)
+        "ALTER TABLE roles DROP CONSTRAINT IF EXISTS roles_name_key",
+        # Clients / patients tables created via metadata.create_all; ensure FKs exist
+        """
+        CREATE TABLE IF NOT EXISTS clients (
+            id SERIAL PRIMARY KEY,
+            clinic_id INTEGER NOT NULL REFERENCES clinics(id),
+            name VARCHAR NOT NULL,
+            email VARCHAR,
+            phone VARCHAR,
+            notes VARCHAR,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            created_by_user_id INTEGER
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS patients (
+            id SERIAL PRIMARY KEY,
+            clinic_id INTEGER NOT NULL REFERENCES clinics(id),
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            name VARCHAR NOT NULL,
+            species VARCHAR,
+            breed VARCHAR,
+            notes VARCHAR,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            created_by_user_id INTEGER
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_global_name ON roles (name) WHERE clinic_id IS NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_clinic_name ON roles (clinic_id, name) WHERE clinic_id IS NOT NULL",
         "UPDATE resources SET category = 'dental_suite' WHERE name LIKE 'Dental Suite%' AND category IS NULL",
         "UPDATE resources SET category = 'surgery_suite' WHERE name LIKE 'Surgery Suite%' AND category IS NULL",
         "UPDATE resources SET category = 'exam_room' WHERE name LIKE 'Exam Room%' AND category IS NULL",
         "UPDATE resources SET category = 'imaging' WHERE name LIKE 'X-Ray%' AND category IS NULL",
         "UPDATE rules SET is_active = TRUE WHERE is_active IS NULL",
         "UPDATE rules SET min_quantity = 1 WHERE min_quantity IS NULL",
+        "UPDATE resources SET is_active = TRUE WHERE is_active IS NULL",
+        "UPDATE services SET is_active = TRUE WHERE is_active IS NULL",
+        "UPDATE roles SET is_active = TRUE WHERE is_active IS NULL",
+        "UPDATE override_logs SET override_type = 'soft_stop' WHERE override_type IS NULL",
+        "UPDATE appointments SET status = 'scheduled' WHERE status IS NULL",
     ]
     for stmt in stmts:
         try:
@@ -240,12 +317,30 @@ def change_password(
 
 @app.get("/api/users", response_model=List[UserOut])
 def list_users(
+    include_inactive: bool = Query(False),
     current_user: User = Depends(require_clinic_admin),
     db: Session = Depends(get_db),
 ):
-    # Multi-tenancy: SYSTEM_ADMIN sees all, CLINIC_ADMIN sees only their clinic
-    q = db.query(User).filter(User.is_active == True)
+    q = db.query(User)
+    if not include_inactive:
+        q = q.filter(User.is_active == True)
     return clinic_filter(q, User, current_user).all()
+
+
+@app.get("/api/staff", response_model=List[UserOut])
+def list_staff(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Clinic-scoped active staff list for booking allocations and override authorizers.
+    Available to any authenticated user (unlike /api/users which is admin-only).
+    """
+    q = db.query(User).filter(User.is_active == True, User.system_role != "SYSTEM_ADMIN")
+    if current_user.system_role == "SYSTEM_ADMIN":
+        # System admins see everyone except other system admins unless filtered by clinic in UI
+        return q.order_by(User.name).all()
+    return q.filter(User.clinic_id == current_user.clinic_id).order_by(User.name).all()
 
 
 @app.post("/api/users", response_model=UserOut, status_code=201)
@@ -257,12 +352,24 @@ def create_user(
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(400, "Email already registered.")
 
-    # CLINIC_ADMIN can only create users for their own clinic
+    if current_user.system_role != "SYSTEM_ADMIN" and payload.system_role == "SYSTEM_ADMIN":
+        raise HTTPException(403, "Cannot grant system administrator role.")
+
     target_clinic_id = (
         payload.clinic_id if current_user.system_role == "SYSTEM_ADMIN"
         else current_user.clinic_id
     )
+    if payload.system_role != "SYSTEM_ADMIN" and target_clinic_id is None:
+        raise HTTPException(400, "clinic_id is required for non-system-admin users.")
 
+    if payload.role_id:
+        role = db.get(Role, payload.role_id)
+        if not role or not role.is_active:
+            raise HTTPException(400, "Clinical role not found or inactive.")
+        if role.clinic_id is not None and role.clinic_id != target_clinic_id:
+            raise HTTPException(400, "Clinical role does not belong to the target clinic.")
+
+    now = datetime.utcnow()
     try:
         user = User(
             name=payload.name,
@@ -272,6 +379,9 @@ def create_user(
             role_id=payload.role_id,
             clinic_id=target_clinic_id,
             is_active=True,
+            created_at=now,
+            updated_at=now,
+            created_by_user_id=current_user.id,
         )
         db.add(user)
         db.commit()
@@ -291,30 +401,6 @@ def list_clinics(
     db: Session = Depends(get_db),
 ):
     return db.query(Clinic).all()
-
-
-@app.get("/api/roles", response_model=List[RoleOut])
-def list_roles(
-    _: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    return db.query(Role).all()
-
-
-@app.get("/api/resources", response_model=List[ResourceOut])
-def list_resources(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    return clinic_filter(db.query(Resource), Resource, current_user).all()
-
-
-@app.get("/api/services", response_model=List[ServiceOut])
-def list_services(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    return clinic_filter(db.query(Service), Service, current_user).all()
 
 
 @app.get("/api/rules", response_model=List[RuleOut])
@@ -704,7 +790,7 @@ def _evaluate_rules(service_id, allocations, db, appt_start=None, service_durati
     return violations
 
 
-def _check_double_booking(allocations_in, appt_start, service_duration, db):
+def _check_double_booking(allocations_in, appt_start, service_duration, db, exclude_appointment_id=None):
     conflicts = []
     for alloc_data in allocations_in:
         offset = alloc_data.start_offset_minutes or 0
@@ -712,13 +798,21 @@ def _check_double_booking(allocations_in, appt_start, service_duration, db):
         alloc_start = appt_start + timedelta(minutes=offset)
         alloc_end = alloc_start + timedelta(minutes=duration)
 
-        if alloc_data.user_id:
-            overlap = db.query(AppointmentAllocation).filter(
-                AppointmentAllocation.user_id == alloc_data.user_id,
+        base = (
+            db.query(AppointmentAllocation)
+            .join(Appointment)
+            .filter(
                 AppointmentAllocation.start_time.isnot(None),
                 AppointmentAllocation.start_time < alloc_end,
                 AppointmentAllocation.end_time > alloc_start,
-            ).first()
+                Appointment.status.in_(["scheduled", "completed", "no_show"]),
+            )
+        )
+        if exclude_appointment_id is not None:
+            base = base.filter(AppointmentAllocation.appointment_id != exclude_appointment_id)
+
+        if alloc_data.user_id:
+            overlap = base.filter(AppointmentAllocation.user_id == alloc_data.user_id).first()
             if overlap:
                 user = db.get(User, alloc_data.user_id)
                 conflicts.append({
@@ -727,12 +821,7 @@ def _check_double_booking(allocations_in, appt_start, service_duration, db):
                 })
 
         if alloc_data.resource_id:
-            overlap = db.query(AppointmentAllocation).filter(
-                AppointmentAllocation.resource_id == alloc_data.resource_id,
-                AppointmentAllocation.start_time.isnot(None),
-                AppointmentAllocation.start_time < alloc_end,
-                AppointmentAllocation.end_time > alloc_start,
-            ).first()
+            overlap = base.filter(AppointmentAllocation.resource_id == alloc_data.resource_id).first()
             if overlap:
                 resource = db.get(Resource, alloc_data.resource_id)
                 conflicts.append({
@@ -754,7 +843,13 @@ def _resolve_appointment_clinic_id(payload: AppointmentCreate, current_user: Use
     return clinic_id
 
 
-def _validate_appointment_inputs(payload: AppointmentCreate, clinic_id: int, db: Session):
+def _validate_appointment_inputs(
+    payload: AppointmentCreate,
+    clinic_id: int,
+    db: Session,
+    *,
+    exclude_appointment_id: Optional[int] = None,
+):
     """
     Shared validation for create + preview. Returns
     (service, hard_violations, soft_violations, conflicts).
@@ -765,6 +860,8 @@ def _validate_appointment_inputs(payload: AppointmentCreate, clinic_id: int, db:
         raise HTTPException(404, "Service not found.")
     if service.clinic_id != clinic_id:
         raise HTTPException(400, "Service does not belong to the target clinic.")
+    if not service.is_active:
+        raise HTTPException(400, "Service is inactive and cannot be booked.")
 
     service_duration = service.default_duration_minutes
 
@@ -787,6 +884,8 @@ def _validate_appointment_inputs(payload: AppointmentCreate, clinic_id: int, db:
             alloc_user = db.get(User, alloc_data.user_id)
             if not alloc_user:
                 raise HTTPException(404, f"User #{alloc_data.user_id} not found.")
+            if not alloc_user.is_active:
+                raise HTTPException(400, f"User '{alloc_user.name}' is inactive.")
             if alloc_user.clinic_id != clinic_id:
                 raise HTTPException(
                     400, f"User '{alloc_user.name}' does not belong to the target clinic."
@@ -796,42 +895,181 @@ def _validate_appointment_inputs(payload: AppointmentCreate, clinic_id: int, db:
             alloc_resource = db.get(Resource, alloc_data.resource_id)
             if not alloc_resource:
                 raise HTTPException(404, f"Resource #{alloc_data.resource_id} not found.")
+            if not alloc_resource.is_active:
+                raise HTTPException(400, f"Resource '{alloc_resource.name}' is inactive.")
             if alloc_resource.clinic_id != clinic_id:
                 raise HTTPException(
                     400, f"Resource '{alloc_resource.name}' does not belong to the target clinic."
                 )
 
+    appt_start = _naive(payload.start_time)
     violations = _evaluate_rules(
         payload.service_id,
         payload.allocations,
         db,
-        appt_start=payload.start_time.replace(tzinfo=None) if payload.start_time.tzinfo else payload.start_time,
+        appt_start=appt_start,
         service_duration=service_duration,
     )
     hard_violations = [v for v in violations if v.is_hard_stop]
     soft_violations = [v for v in violations if not v.is_hard_stop]
 
-    conflicts = []
-    if not payload.override_double_booking:
-        conflicts = _check_double_booking(
-            payload.allocations,
-            payload.start_time.replace(tzinfo=None) if payload.start_time.tzinfo else payload.start_time,
-            service_duration,
-            db,
-        )
+    # Always compute conflicts so callers can require an authorizer / audit when
+    # override_double_booking is set. Callers decide whether to block or allow.
+    conflicts = _check_double_booking(
+        payload.allocations,
+        appt_start,
+        service_duration,
+        db,
+        exclude_appointment_id=exclude_appointment_id,
+    )
 
     return service, hard_violations, soft_violations, conflicts
 
 
 # ── Appointments ──────────────────────────────────────────────────────────────
 
+def _naive(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
+ALLOWED_STATUS_TRANSITIONS = {
+    "scheduled": {"completed", "cancelled", "no_show"},
+    "no_show": {"scheduled", "cancelled"},
+    "completed": {"scheduled"},  # reopen if marked by mistake
+    "cancelled": set(),  # terminal — create a new appointment instead
+}
+
+
+def _apply_status_transition(appt: Appointment, new_status: str):
+    if new_status == appt.status:
+        return
+    allowed = ALLOWED_STATUS_TRANSITIONS.get(appt.status, set())
+    if new_status not in allowed:
+        raise HTTPException(
+            400,
+            f"Cannot transition appointment from '{appt.status}' to '{new_status}'.",
+        )
+    appt.status = new_status
+
+
+def _assert_override_authorizer(user_id: Optional[int], clinic_id: int, db: Session):
+    """Ensure overriding_user_id is an active staff member of the target clinic."""
+    if user_id is None:
+        return
+    authorizer = db.get(User, user_id)
+    if not authorizer or not authorizer.is_active:
+        raise HTTPException(400, "Authorizing staff member not found or inactive.")
+    if authorizer.system_role == "SYSTEM_ADMIN":
+        raise HTTPException(400, "System administrators cannot be used as override authorizers.")
+    if authorizer.clinic_id != clinic_id:
+        raise HTTPException(400, "Authorizing staff member does not belong to the target clinic.")
+
+
+def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Session):
+    """
+    Resolve client/patient entities for a booking.
+    Prefers IDs; otherwise find-or-create from free-text names.
+    Returns (client_id, patient_id, client_name, patient_name).
+    """
+    client = None
+    patient = None
+
+    if payload.client_id:
+        client = db.get(Client, payload.client_id)
+        if not client or client.clinic_id != clinic_id:
+            raise HTTPException(400, "Client not found in target clinic.")
+    elif payload.client_name:
+        client = (
+            db.query(Client)
+            .filter(
+                Client.clinic_id == clinic_id,
+                Client.name == payload.client_name.strip(),
+                Client.is_active == True,
+            )
+            .first()
+        )
+        if not client:
+            client = Client(
+                clinic_id=clinic_id,
+                name=payload.client_name.strip(),
+                is_active=True,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                created_by_user_id=current_user.id,
+            )
+            db.add(client)
+            db.flush()
+
+    if payload.patient_id:
+        patient = db.get(Patient, payload.patient_id)
+        if not patient or patient.clinic_id != clinic_id:
+            raise HTTPException(400, "Patient not found in target clinic.")
+        if client and patient.client_id != client.id:
+            raise HTTPException(400, "Patient does not belong to the selected client.")
+        if not client:
+            client = db.get(Client, patient.client_id)
+    elif payload.patient_name:
+        if not client:
+            raise HTTPException(400, "A client is required before creating a patient by name.")
+        patient = (
+            db.query(Patient)
+            .filter(
+                Patient.client_id == client.id,
+                Patient.name == payload.patient_name.strip(),
+                Patient.is_active == True,
+            )
+            .first()
+        )
+        if not patient:
+            patient = Patient(
+                clinic_id=clinic_id,
+                client_id=client.id,
+                name=payload.patient_name.strip(),
+                is_active=True,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                created_by_user_id=current_user.id,
+            )
+            db.add(patient)
+            db.flush()
+
+    client_name = client.name if client else (payload.client_name or "")
+    patient_name = patient.name if patient else (payload.patient_name or "")
+    return (
+        client.id if client else None,
+        patient.id if patient else None,
+        client_name,
+        patient_name,
+    )
+
+
 @app.get("/api/appointments", response_model=List[AppointmentOut])
 def list_appointments(
+    status: Optional[str] = Query(None),
+    include_cancelled: bool = Query(False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    q = db.query(Appointment).order_by(Appointment.start_time)
-    return clinic_filter(q, Appointment, current_user).all()
+    q = clinic_filter(db.query(Appointment), Appointment, current_user)
+    if status:
+        q = q.filter(Appointment.status == status)
+    elif not include_cancelled:
+        q = q.filter(Appointment.status != "cancelled")
+    return q.order_by(Appointment.start_time).all()
+
+
+@app.get("/api/appointments/{appointment_id}", response_model=AppointmentOut)
+def get_appointment(
+    appointment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    appt = db.get(Appointment, appointment_id)
+    if not appt:
+        raise HTTPException(404, "Appointment not found.")
+    if current_user.system_role != "SYSTEM_ADMIN" and appt.clinic_id != current_user.clinic_id:
+        raise HTTPException(403, "Access denied.")
+    return appt
 
 
 @app.post("/api/appointments/validate", response_model=AppointmentValidateOut)
@@ -840,11 +1078,12 @@ def validate_appointment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Preview rule + double-booking violations without creating an appointment."""
     clinic_id = _resolve_appointment_clinic_id(payload, current_user)
     _, hard, soft, conflicts = _validate_appointment_inputs(payload, clinic_id, db)
+    soft_blocking = soft and not payload.override
+    conflict_blocking = conflicts and not payload.override_double_booking
     return AppointmentValidateOut(
-        valid=not hard and not soft and not conflicts,
+        valid=not hard and not soft_blocking and not conflict_blocking,
         hard_violations=hard,
         soft_violations=soft,
         double_booking_conflicts=conflicts,
@@ -886,44 +1125,68 @@ def create_appointment(
             "conflicts": conflicts,
         })
 
-    # Row-level lock before insert to reduce TOCTOU races
-    if not payload.override_double_booking:
-        appt_start = payload.start_time.replace(tzinfo=None) if payload.start_time.tzinfo else payload.start_time
-        appt_end = appt_start + timedelta(minutes=service_duration)
-        for alloc_data in payload.allocations:
-            if alloc_data.user_id:
-                db.query(AppointmentAllocation).filter(
-                    AppointmentAllocation.user_id == alloc_data.user_id,
-                    AppointmentAllocation.start_time.isnot(None),
-                    AppointmentAllocation.start_time < appt_end,
-                    AppointmentAllocation.end_time > appt_start,
-                ).with_for_update().all()
-            if alloc_data.resource_id:
-                db.query(AppointmentAllocation).filter(
-                    AppointmentAllocation.resource_id == alloc_data.resource_id,
-                    AppointmentAllocation.start_time.isnot(None),
-                    AppointmentAllocation.start_time < appt_end,
-                    AppointmentAllocation.end_time > appt_start,
-                ).with_for_update().all()
+    if payload.override_double_booking and conflicts and not payload.overriding_user_id:
+        raise HTTPException(
+            400,
+            "An authorizing staff member (overriding_user_id) is required to override a double-booking.",
+        )
 
-        # Re-check after lock
-        conflicts = _check_double_booking(payload.allocations, appt_start, service_duration, db)
-        if conflicts:
-            raise HTTPException(400, detail={
-                "type": "double_booking",
-                "conflicts": conflicts,
-            })
+    if payload.overriding_user_id and (
+        (payload.override and soft_violations)
+        or (payload.override_double_booking and conflicts)
+    ):
+        _assert_override_authorizer(payload.overriding_user_id, clinic_id, db)
 
-    start_time = payload.start_time.replace(tzinfo=None) if payload.start_time.tzinfo else payload.start_time
+    start_time = _naive(payload.start_time)
+    # Always lock overlapping allocation rows, then re-check under the lock.
+    appt_end = start_time + timedelta(minutes=service_duration)
+    for alloc_data in payload.allocations:
+        if alloc_data.user_id:
+            db.query(AppointmentAllocation).filter(
+                AppointmentAllocation.user_id == alloc_data.user_id,
+                AppointmentAllocation.start_time.isnot(None),
+                AppointmentAllocation.start_time < appt_end,
+                AppointmentAllocation.end_time > start_time,
+            ).with_for_update().all()
+        if alloc_data.resource_id:
+            db.query(AppointmentAllocation).filter(
+                AppointmentAllocation.resource_id == alloc_data.resource_id,
+                AppointmentAllocation.start_time.isnot(None),
+                AppointmentAllocation.start_time < appt_end,
+                AppointmentAllocation.end_time > start_time,
+            ).with_for_update().all()
+    conflicts = _check_double_booking(payload.allocations, start_time, service_duration, db)
+    if conflicts and not payload.override_double_booking:
+        raise HTTPException(400, detail={
+            "type": "double_booking",
+            "conflicts": conflicts,
+        })
+    if conflicts and payload.override_double_booking and not payload.overriding_user_id:
+        raise HTTPException(
+            400,
+            "An authorizing staff member (overriding_user_id) is required to override a double-booking.",
+        )
+    if conflicts and payload.override_double_booking and payload.overriding_user_id:
+        _assert_override_authorizer(payload.overriding_user_id, clinic_id, db)
+
+    client_id, patient_id, client_name, patient_name = _resolve_client_patient(
+        payload, clinic_id, current_user, db
+    )
     end_time = start_time + timedelta(minutes=service_duration)
+    now = datetime.utcnow()
     appt = Appointment(
         clinic_id=clinic_id,
         service_id=payload.service_id,
+        client_id=client_id,
+        patient_id=patient_id,
         start_time=start_time,
         end_time=end_time,
-        client_name=payload.client_name,
-        patient_name=payload.patient_name,
+        client_name=client_name,
+        patient_name=patient_name,
         status="scheduled",
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=current_user.id,
     )
 
     try:
@@ -933,15 +1196,16 @@ def create_appointment(
         for alloc_data in payload.allocations:
             offset = alloc_data.start_offset_minutes or 0
             duration = alloc_data.duration_minutes or service_duration
-            alloc = AppointmentAllocation(
+            db.add(AppointmentAllocation(
                 appointment_id=appt.id,
                 user_id=alloc_data.user_id,
                 resource_id=alloc_data.resource_id,
                 start_time=start_time + timedelta(minutes=offset),
                 end_time=start_time + timedelta(minutes=offset + duration),
                 presence_type=alloc_data.presence_type,
-            )
-            db.add(alloc)
+                created_at=now,
+                updated_at=now,
+            ))
 
         if payload.override and soft_violations and payload.overriding_user_id:
             for v in soft_violations:
@@ -949,8 +1213,21 @@ def create_appointment(
                     appointment_id=appt.id,
                     rule_id=v.rule_id,
                     overridden_by_user_id=payload.overriding_user_id,
-                    timestamp=datetime.utcnow(),
+                    override_type="soft_stop",
+                    timestamp=now,
                 ))
+
+        # Only audit when an actual conflict was overridden
+        if payload.override_double_booking and conflicts and payload.overriding_user_id:
+            names = ", ".join(c["entity"] for c in conflicts)
+            db.add(OverrideLog(
+                appointment_id=appt.id,
+                rule_id=None,
+                overridden_by_user_id=payload.overriding_user_id,
+                override_type="double_booking",
+                notes=f"Overrode conflicts: {names}",
+                timestamp=now,
+            ))
 
         db.commit()
     except Exception as exc:
@@ -959,6 +1236,209 @@ def create_appointment(
 
     db.refresh(appt)
     return AppointmentOut.model_validate(appt)
+
+
+@app.patch("/api/appointments/{appointment_id}", response_model=AppointmentOut)
+def update_appointment(
+    appointment_id: int,
+    payload: AppointmentUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from schemas import AllocationIn
+
+    appt = db.get(Appointment, appointment_id)
+    if not appt:
+        raise HTTPException(404, "Appointment not found.")
+    if current_user.system_role != "SYSTEM_ADMIN" and appt.clinic_id != current_user.clinic_id:
+        raise HTTPException(403, "Access denied.")
+
+    data = payload.model_dump(exclude_unset=True)
+    status_only = set(data.keys()) <= {"status"}
+
+    if status_only:
+        if "status" in data:
+            _apply_status_transition(appt, data["status"])
+        appt.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(appt)
+        return appt
+
+    if appt.status == "cancelled":
+        raise HTTPException(400, "Cancelled appointments cannot be rescheduled; create a new one.")
+
+    start_time = _naive(payload.start_time) if payload.start_time else appt.start_time
+    service_id = payload.service_id or appt.service_id
+    allocations = payload.allocations
+    if allocations is None:
+        service = db.get(Service, service_id)
+        service_duration = service.default_duration_minutes if service else 30
+        allocations = []
+        for a in appt.allocations:
+            offset = int((a.start_time - appt.start_time).total_seconds() // 60) if a.start_time else 0
+            duration = (
+                int((a.end_time - a.start_time).total_seconds() // 60)
+                if a.start_time and a.end_time else service_duration
+            )
+            allocations.append(AllocationIn(
+                user_id=a.user_id,
+                resource_id=a.resource_id,
+                presence_type=a.presence_type,
+                start_offset_minutes=max(offset, 0),
+                duration_minutes=max(duration, 1),
+            ))
+
+    create_like = AppointmentCreate(
+        clinic_id=appt.clinic_id,
+        service_id=service_id,
+        start_time=start_time,
+        client_id=payload.client_id if payload.client_id is not None else appt.client_id,
+        patient_id=payload.patient_id if payload.patient_id is not None else appt.patient_id,
+        client_name=payload.client_name or appt.client_name,
+        patient_name=payload.patient_name or appt.patient_name,
+        allocations=allocations,
+        override=payload.override,
+        overriding_user_id=payload.overriding_user_id,
+        override_double_booking=payload.override_double_booking,
+    )
+
+    service, hard, soft, conflicts = _validate_appointment_inputs(
+        create_like,
+        appt.clinic_id,
+        db,
+        exclude_appointment_id=appt.id,
+    )
+    service_duration = service.default_duration_minutes
+
+    if hard:
+        raise HTTPException(400, detail={"type": "hard_stop", "violations": [v.model_dump() for v in hard]})
+    if soft and not payload.override:
+        raise HTTPException(422, detail={"type": "soft_stop", "violations": [v.model_dump() for v in soft]})
+    if payload.override and soft and not payload.overriding_user_id:
+        raise HTTPException(400, "overriding_user_id required to override soft stop.")
+    if conflicts and not payload.override_double_booking:
+        raise HTTPException(400, detail={"type": "double_booking", "conflicts": conflicts})
+    if payload.override_double_booking and conflicts and not payload.overriding_user_id:
+        raise HTTPException(400, "overriding_user_id required to override a double-booking.")
+
+    if payload.overriding_user_id and (
+        (payload.override and soft)
+        or (payload.override_double_booking and conflicts)
+    ):
+        _assert_override_authorizer(payload.overriding_user_id, appt.clinic_id, db)
+
+    # Always lock overlapping allocation rows (excluding this appointment), then re-check.
+    appt_end = start_time + timedelta(minutes=service_duration)
+    for alloc_data in allocations:
+        if alloc_data.user_id:
+            db.query(AppointmentAllocation).filter(
+                AppointmentAllocation.user_id == alloc_data.user_id,
+                AppointmentAllocation.appointment_id != appt.id,
+                AppointmentAllocation.start_time.isnot(None),
+                AppointmentAllocation.start_time < appt_end,
+                AppointmentAllocation.end_time > start_time,
+            ).with_for_update().all()
+        if alloc_data.resource_id:
+            db.query(AppointmentAllocation).filter(
+                AppointmentAllocation.resource_id == alloc_data.resource_id,
+                AppointmentAllocation.appointment_id != appt.id,
+                AppointmentAllocation.start_time.isnot(None),
+                AppointmentAllocation.start_time < appt_end,
+                AppointmentAllocation.end_time > start_time,
+            ).with_for_update().all()
+    conflicts = _check_double_booking(
+        allocations,
+        start_time,
+        service_duration,
+        db,
+        exclude_appointment_id=appt.id,
+    )
+    if conflicts and not payload.override_double_booking:
+        raise HTTPException(400, detail={"type": "double_booking", "conflicts": conflicts})
+    if conflicts and payload.override_double_booking and not payload.overriding_user_id:
+        raise HTTPException(400, "overriding_user_id required to override a double-booking.")
+    if conflicts and payload.override_double_booking and payload.overriding_user_id:
+        _assert_override_authorizer(payload.overriding_user_id, appt.clinic_id, db)
+
+    if "status" in data:
+        _apply_status_transition(appt, data["status"])
+
+    client_id, patient_id, client_name, patient_name = _resolve_client_patient(
+        create_like, appt.clinic_id, current_user, db
+    )
+
+    appt.service_id = service_id
+    appt.start_time = start_time
+    appt.end_time = start_time + timedelta(minutes=service_duration)
+    appt.client_id = client_id
+    appt.patient_id = patient_id
+    appt.client_name = client_name
+    appt.patient_name = patient_name
+    appt.updated_at = datetime.utcnow()
+
+    for old in list(appt.allocations):
+        db.delete(old)
+    db.flush()
+    now = datetime.utcnow()
+    for alloc_data in allocations:
+        offset = alloc_data.start_offset_minutes or 0
+        duration = alloc_data.duration_minutes or service_duration
+        db.add(AppointmentAllocation(
+            appointment_id=appt.id,
+            user_id=alloc_data.user_id,
+            resource_id=alloc_data.resource_id,
+            start_time=start_time + timedelta(minutes=offset),
+            end_time=start_time + timedelta(minutes=offset + duration),
+            presence_type=alloc_data.presence_type,
+            created_at=now,
+            updated_at=now,
+        ))
+
+    if payload.override and soft and payload.overriding_user_id:
+        for v in soft:
+            db.add(OverrideLog(
+                appointment_id=appt.id,
+                rule_id=v.rule_id,
+                overridden_by_user_id=payload.overriding_user_id,
+                override_type="soft_stop",
+                timestamp=now,
+            ))
+    if payload.override_double_booking and conflicts and payload.overriding_user_id:
+        names = ", ".join(c["entity"] for c in conflicts)
+        db.add(OverrideLog(
+            appointment_id=appt.id,
+            rule_id=None,
+            overridden_by_user_id=payload.overriding_user_id,
+            override_type="double_booking",
+            notes=f"Overrode conflicts: {names}",
+            timestamp=now,
+        ))
+
+    try:
+        db.commit()
+        db.refresh(appt)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, detail=str(exc))
+    return appt
+
+
+@app.post("/api/appointments/{appointment_id}/cancel", response_model=AppointmentOut)
+def cancel_appointment(
+    appointment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    appt = db.get(Appointment, appointment_id)
+    if not appt:
+        raise HTTPException(404, "Appointment not found.")
+    if current_user.system_role != "SYSTEM_ADMIN" and appt.clinic_id != current_user.clinic_id:
+        raise HTTPException(403, "Access denied.")
+    _apply_status_transition(appt, "cancelled")
+    appt.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(appt)
+    return appt
 
 
 @app.get("/api/users/{user_id}/schedule")
@@ -994,6 +1474,7 @@ def get_user_schedule(
             AppointmentAllocation.start_time.isnot(None),
             AppointmentAllocation.start_time < end_naive,
             AppointmentAllocation.end_time > start_naive,
+            Appointment.status != "cancelled",
         )
         .all()
     )
@@ -1041,6 +1522,7 @@ def get_resource_schedule(
             AppointmentAllocation.start_time.isnot(None),
             AppointmentAllocation.start_time < end_naive,
             AppointmentAllocation.end_time > start_naive,
+            Appointment.status != "cancelled",
         )
         .all()
     )

@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List, Optional
+
 from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
@@ -20,16 +21,37 @@ class PasswordChange(BaseModel):
 class ClinicOut(BaseModel):
     id: int
     name: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
 # ── Roles ────────────────────────────────────────────────────────────────────
 
+class RoleCreate(BaseModel):
+    name: str
+    can_prescribe: bool = False
+    # SYSTEM_ADMIN only: create a clinic-specific role for another clinic,
+    # or omit / null for a global catalog role.
+    clinic_id: Optional[int] = None
+    # If True and caller is SYSTEM_ADMIN with no clinic_id, create as global.
+    # CLINIC_ADMIN always creates clinic-scoped roles for their own clinic.
+    is_global: bool = False
+
+
+class RoleUpdate(BaseModel):
+    name: Optional[str] = None
+    can_prescribe: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
 class RoleOut(BaseModel):
     id: int
     name: str
     can_prescribe: bool
+    clinic_id: Optional[int] = None
+    is_active: bool = True
 
     model_config = {"from_attributes": True}
 
@@ -40,10 +62,20 @@ class UserCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
-    system_role: str = "USER"  # SYSTEM_ADMIN | CLINIC_ADMIN | USER
+    system_role: str = "USER"
     role_id: Optional[int] = None
-    # Only used when a SYSTEM_ADMIN creates a user for a specific clinic
     clinic_id: Optional[int] = None
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    system_role: Optional[str] = None
+    role_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    clear_role_id: bool = False
+    # Admin password reset (optional)
+    password: Optional[str] = None
 
 
 class UserOut(BaseModel):
@@ -54,11 +86,28 @@ class UserOut(BaseModel):
     is_active: bool
     clinic_id: Optional[int]
     role: Optional[RoleOut]
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
 # ── Resources ────────────────────────────────────────────────────────────────
+
+class ResourceCreate(BaseModel):
+    name: str
+    resource_type: str  # room | equipment
+    category: Optional[str] = None
+    clinic_id: Optional[int] = None  # SYSTEM_ADMIN only
+
+
+class ResourceUpdate(BaseModel):
+    name: Optional[str] = None
+    resource_type: Optional[str] = None
+    category: Optional[str] = None
+    is_active: Optional[bool] = None
+    clear_category: bool = False
+
 
 class ResourceOut(BaseModel):
     id: int
@@ -66,17 +115,97 @@ class ResourceOut(BaseModel):
     name: str
     resource_type: str
     category: Optional[str] = None
+    is_active: bool = True
 
     model_config = {"from_attributes": True}
 
 
 # ── Services ─────────────────────────────────────────────────────────────────
 
+class ServiceCreate(BaseModel):
+    name: str
+    default_duration_minutes: int = Field(default=30, ge=1)
+    clinic_id: Optional[int] = None
+
+
+class ServiceUpdate(BaseModel):
+    name: Optional[str] = None
+    default_duration_minutes: Optional[int] = Field(default=None, ge=1)
+    is_active: Optional[bool] = None
+
+
 class ServiceOut(BaseModel):
     id: int
     clinic_id: int
     name: str
     default_duration_minutes: int
+    is_active: bool = True
+
+    model_config = {"from_attributes": True}
+
+
+# ── Clients / Patients ───────────────────────────────────────────────────────
+
+class ClientCreate(BaseModel):
+    name: str
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    clinic_id: Optional[int] = None
+
+
+class ClientUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+    clear_email: bool = False
+    clear_phone: bool = False
+    clear_notes: bool = False
+
+
+class PatientCreate(BaseModel):
+    client_id: int
+    name: str
+    species: Optional[str] = None
+    breed: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PatientUpdate(BaseModel):
+    name: Optional[str] = None
+    species: Optional[str] = None
+    breed: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+    clear_species: bool = False
+    clear_breed: bool = False
+    clear_notes: bool = False
+
+
+class PatientOut(BaseModel):
+    id: int
+    clinic_id: int
+    client_id: int
+    name: str
+    species: Optional[str] = None
+    breed: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool = True
+
+    model_config = {"from_attributes": True}
+
+
+class ClientOut(BaseModel):
+    id: int
+    clinic_id: int
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool = True
+    patients: List[PatientOut] = []
 
     model_config = {"from_attributes": True}
 
@@ -96,11 +225,10 @@ class RuleCreate(BaseModel):
     description: str
     duration_minutes: Optional[int] = Field(default=None, ge=1)
     start_offset_minutes: int = Field(default=0, ge=0)
-    presence_type: Optional[str] = None  # IN_ROOM | IN_BUILDING | REMOTE
-    active_weekdays: Optional[List[int]] = None  # 0=Mon … 6=Sun
-    active_start_time: Optional[str] = None  # "HH:MM"
-    active_end_time: Optional[str] = None  # "HH:MM"
-    # Only honoured when the caller is a SYSTEM_ADMIN
+    presence_type: Optional[str] = None
+    active_weekdays: Optional[List[int]] = None
+    active_start_time: Optional[str] = None
+    active_end_time: Optional[str] = None
     clinic_id: Optional[int] = None
 
     @model_validator(mode="after")
@@ -147,7 +275,6 @@ class RuleUpdate(BaseModel):
     active_weekdays: Optional[List[int]] = None
     active_start_time: Optional[str] = None
     active_end_time: Optional[str] = None
-    # Explicit clear flags for nullable fields set via PATCH
     clear_required_role_id: bool = False
     clear_alternative_role_ids: bool = False
     clear_required_resource_id: bool = False
@@ -198,10 +325,13 @@ class SoftStopResponse(BaseModel):
 
 # ── Booking ───────────────────────────────────────────────────────────────────
 
+APPOINTMENT_STATUSES = ("scheduled", "completed", "cancelled", "no_show")
+
+
 class AllocationIn(BaseModel):
     user_id: Optional[int] = None
     resource_id: Optional[int] = None
-    presence_type: Optional[str] = None  # IN_ROOM | IN_BUILDING | REMOTE
+    presence_type: Optional[str] = None
     start_offset_minutes: int = Field(default=0, ge=0)
     duration_minutes: Optional[int] = Field(default=None, ge=1)
 
@@ -215,15 +345,46 @@ class AllocationIn(BaseModel):
 
 
 class AppointmentCreate(BaseModel):
-    clinic_id: Optional[int] = None  # required when current_user is SYSTEM_ADMIN
+    clinic_id: Optional[int] = None
     service_id: int
     start_time: datetime
-    client_name: str
-    patient_name: str
+    # Prefer entity IDs; free-text names still accepted for find-or-create / legacy
+    client_id: Optional[int] = None
+    patient_id: Optional[int] = None
+    client_name: Optional[str] = None
+    patient_name: Optional[str] = None
     allocations: List[AllocationIn] = []
     override: bool = False
     overriding_user_id: Optional[int] = None
     override_double_booking: bool = False
+
+    @model_validator(mode="after")
+    def require_client_patient(self):
+        if not self.client_id and not self.client_name:
+            raise ValueError("Provide client_id or client_name.")
+        if not self.patient_id and not self.patient_name:
+            raise ValueError("Provide patient_id or patient_name.")
+        return self
+
+
+class AppointmentUpdate(BaseModel):
+    service_id: Optional[int] = None
+    start_time: Optional[datetime] = None
+    client_id: Optional[int] = None
+    patient_id: Optional[int] = None
+    client_name: Optional[str] = None
+    patient_name: Optional[str] = None
+    status: Optional[str] = None
+    allocations: Optional[List[AllocationIn]] = None
+    override: bool = False
+    overriding_user_id: Optional[int] = None
+    override_double_booking: bool = False
+
+    @model_validator(mode="after")
+    def validate_status(self):
+        if self.status is not None and self.status not in APPOINTMENT_STATUSES:
+            raise ValueError(f"status must be one of {APPOINTMENT_STATUSES}")
+        return self
 
 
 class AppointmentValidateOut(BaseModel):
@@ -235,12 +396,17 @@ class AppointmentValidateOut(BaseModel):
 
 class AppointmentOut(BaseModel):
     id: int
+    clinic_id: int
     service_id: int
+    client_id: Optional[int] = None
+    patient_id: Optional[int] = None
     start_time: datetime
     end_time: datetime
     client_name: str
     patient_name: str
     status: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -256,3 +422,4 @@ class ScheduleEventOut(BaseModel):
     client_name: str
     patient_name: str
     service_name: str
+    status: Optional[str] = None

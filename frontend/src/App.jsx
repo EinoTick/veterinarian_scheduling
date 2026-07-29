@@ -10,6 +10,9 @@ import ProfilePage from "@/pages/ProfilePage";
 import ChangePasswordPage from "@/pages/ChangePasswordPage";
 import MySchedule from "@/pages/MySchedule";
 import ResourceSchedule from "@/pages/ResourceSchedule";
+import ResourcesPage from "@/pages/ResourcesPage";
+import ServicesPage from "@/pages/ServicesPage";
+import ClientsPage from "@/pages/ClientsPage";
 
 export default function App() {
   return (
@@ -24,11 +27,14 @@ export default function App() {
               <Route path="bookings" element={<BookingsPage />} />
               <Route path="schedule" element={<MySchedule />} />
               <Route path="resource-schedule" element={<ResourceSchedule />} />
+              <Route path="clients" element={<ClientsPage />} />
               <Route path="profile" element={<ProfilePage />} />
               <Route path="change-password" element={<ChangePasswordPage />} />
               <Route element={<ProtectedRoute roles={["CLINIC_ADMIN", "SYSTEM_ADMIN"]} />}>
                 <Route path="users" element={<UsersPage />} />
                 <Route path="rules" element={<RulesPage />} />
+                <Route path="resources" element={<ResourcesPage />} />
+                <Route path="services" element={<ServicesPage />} />
               </Route>
             </Route>
           </Route>

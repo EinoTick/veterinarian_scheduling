@@ -11,12 +11,18 @@ import {
   UserCircle,
   KeyRound,
   LogOut,
+  Stethoscope,
+  PawPrint,
+  Boxes,
 } from "lucide-react";
 
 const NAV_ITEMS = [
   { to: "/bookings", label: "Bookings", icon: CalendarDays },
   { to: "/schedule", label: "My Schedule", icon: CalendarRange },
-  { to: "/resource-schedule", label: "Rooms & Equipment", icon: DoorOpen },
+  { to: "/resource-schedule", label: "Schedules", icon: DoorOpen },
+  { to: "/clients", label: "Clients", icon: PawPrint },
+  { to: "/resources", label: "Resources", icon: Boxes, adminOnly: true },
+  { to: "/services", label: "Services", icon: Stethoscope, adminOnly: true },
   { to: "/users", label: "Users", icon: Users, adminOnly: true },
   { to: "/rules", label: "Rules", icon: ShieldCheck, adminOnly: true },
   { to: "/profile", label: "My Profile", icon: UserCircle },
