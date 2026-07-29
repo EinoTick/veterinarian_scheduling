@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator, model_validator
 
 from password_policy import validate_password_strength
 
@@ -33,6 +33,7 @@ class PasswordChange(BaseModel):
 class ClinicOut(BaseModel):
     id: int
     name: str
+    timezone: str = "UTC"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -434,6 +435,18 @@ class AppointmentOut(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_serializer("start_time", "end_time", "created_at", "updated_at")
+    def _ser_utc(self, v: Optional[datetime]) -> Optional[str]:
+        from timeutil import as_utc_iso
+        return as_utc_iso(v)
+
+
+class AppointmentListOut(BaseModel):
+    items: List[AppointmentOut]
+    total: int
+    limit: int
+    offset: int
+
 
 # ── Schedule ──────────────────────────────────────────────────────────────────
 
@@ -447,3 +460,8 @@ class ScheduleEventOut(BaseModel):
     patient_name: str
     service_name: str
     status: Optional[str] = None
+
+    @field_serializer("start_time", "end_time")
+    def _ser_utc(self, v: Optional[datetime]) -> Optional[str]:
+        from timeutil import as_utc_iso
+        return as_utc_iso(v)

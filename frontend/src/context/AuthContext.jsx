@@ -1,10 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { API_BASE } from "@/lib/config";
+import { detailMessage } from "@/lib/http";
 
 const AuthContext = createContext(null);
 
 // Prefer same-origin (Vite proxy) so httpOnly cookies stay first-party.
-// Override with VITE_API_BASE only when the API is on a different origin.
-const API = import.meta.env.VITE_API_BASE ?? "";
+// Override with VITE_API_BASE when the API is on a different origin.
+const API = API_BASE;
 
 let refreshInFlight = null;
 
@@ -28,15 +30,6 @@ async function fetchMe(signal) {
     credentials: "include",
     signal,
   });
-}
-
-function detailMessage(errBody, fallback) {
-  if (!errBody) return fallback;
-  if (typeof errBody.detail === "string") return errBody.detail;
-  if (Array.isArray(errBody.detail)) {
-    return errBody.detail.map((d) => d.msg || JSON.stringify(d)).join(" ");
-  }
-  return fallback;
 }
 
 function buildFetchHeaders(options = {}) {

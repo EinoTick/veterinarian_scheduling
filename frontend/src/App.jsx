@@ -1,5 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "@/context/AuthContext";
+import { CatalogProvider } from "@/context/CatalogContext";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import AppLayout from "@/components/AppLayout";
 import LoginPage from "@/pages/LoginPage";
@@ -17,36 +19,40 @@ import ClientsPage from "@/pages/ClientsPage";
 export default function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
+      <ErrorBoundary>
+        <AuthProvider>
+          <CatalogProvider>
+            <Routes>
+              <Route path="/login" element={<LoginPage />} />
 
-          <Route element={<ProtectedRoute />}>
-            <Route element={<AppLayout />}>
-              <Route index element={<Navigate to="/bookings" replace />} />
-              <Route path="bookings" element={<BookingsPage />} />
-              <Route path="schedule" element={<MySchedule />} />
-              <Route path="resource-schedule" element={<ResourceSchedule />} />
-              <Route path="clients" element={<ClientsPage />} />
-              <Route path="profile" element={<ProfilePage />} />
-              <Route path="change-password" element={<ChangePasswordPage />} />
-              <Route element={<ProtectedRoute roles={["CLINIC_ADMIN", "SYSTEM_ADMIN"]} />}>
-                <Route path="users" element={<UsersPage />} />
-                <Route path="rules" element={<RulesPage />} />
-                <Route path="resources" element={<ResourcesPage />} />
-                <Route path="services" element={<ServicesPage />} />
+              <Route element={<ProtectedRoute />}>
+                <Route element={<AppLayout />}>
+                  <Route index element={<Navigate to="/bookings" replace />} />
+                  <Route path="bookings" element={<BookingsPage />} />
+                  <Route path="schedule" element={<MySchedule />} />
+                  <Route path="resource-schedule" element={<ResourceSchedule />} />
+                  <Route path="clients" element={<ClientsPage />} />
+                  <Route path="profile" element={<ProfilePage />} />
+                  <Route path="change-password" element={<ChangePasswordPage />} />
+                  <Route element={<ProtectedRoute roles={["CLINIC_ADMIN", "SYSTEM_ADMIN"]} />}>
+                    <Route path="users" element={<UsersPage />} />
+                    <Route path="rules" element={<RulesPage />} />
+                    <Route path="resources" element={<ResourcesPage />} />
+                    <Route path="services" element={<ServicesPage />} />
+                  </Route>
+                </Route>
               </Route>
-            </Route>
-          </Route>
 
-          <Route path="/unauthorized" element={
-            <div className="flex h-screen items-center justify-center text-muted-foreground">
-              Access denied.
-            </div>
-          } />
-          <Route path="*" element={<Navigate to="/bookings" replace />} />
-        </Routes>
-      </AuthProvider>
+              <Route path="/unauthorized" element={
+                <div className="flex h-screen items-center justify-center text-muted-foreground">
+                  Access denied.
+                </div>
+              } />
+              <Route path="*" element={<Navigate to="/bookings" replace />} />
+            </Routes>
+          </CatalogProvider>
+        </AuthProvider>
+      </ErrorBoundary>
     </BrowserRouter>
   );
 }

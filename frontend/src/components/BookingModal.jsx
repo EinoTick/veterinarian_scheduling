@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -9,8 +9,15 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle, ShieldAlert, Plus, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
+import {
+  isPastLocalDatetime,
+  localDatetimeToUtcIso,
+  toLocalDatetimeValue,
+} from "@/lib/datetime";
 
 const PRESENCE_TYPES = [
   { value: "IN_ROOM", label: "In Room" },
@@ -30,13 +37,9 @@ const EMPTY_FORM = {
 
 export default function BookingModal({ open, onClose, onBooked }) {
   const { apiFetch, user } = useAuth();
+  const { services: allServices, staff: allStaff, resources: allResources, rules: allRules, clinics, ensure, forClinic } =
+    useCatalog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
-
-  const [services, setServices] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [resources, setResources] = useState([]);
-  const [clinics, setClinics] = useState([]);
-  const [rules, setRules] = useState([]);
 
   const [form, setForm] = useState(EMPTY_FORM);
   const [softViolations, setSoftViolations] = useState(null);
@@ -45,45 +48,33 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [livePreview, setLivePreview] = useState(null);
+  const [minStart, setMinStart] = useState(() => toLocalDatetimeValue(new Date()));
 
-  // On open: load clinics list (system admins only) once
-  useEffect(() => {
-    if (!open || !isSystemAdmin) return;
-    apiFetch("/api/clinics")
-      .then((r) => (r.ok ? r.json() : []))
-      .then(setClinics)
-      .catch(() => {});
-  }, [open]);
-
-  // Reload clinic-scoped data whenever the modal opens or the selected clinic changes.
-  // For non-system-admins the backend already scopes by the caller's clinic, so we
-  // only re-fetch on open.  For system admins we also re-fetch when form.clinic_id
-  // changes so the dropdowns only show that clinic's staff/rooms/services.
   useEffect(() => {
     if (!open) return;
-    if (isSystemAdmin && !form.clinic_id) return; // wait until clinic is chosen
+    setMinStart(toLocalDatetimeValue(new Date()));
+    const keys = ["services", "staff", "resources", "rules"];
+    if (isSystemAdmin) keys.push("clinics");
+    ensure(keys).catch(() => {});
+  }, [open, ensure, isSystemAdmin]);
 
-    const safe = (r) => (r.ok ? r.json() : []);
-    Promise.all([
-      apiFetch(`/api/services`).then(safe),
-      apiFetch(`/api/staff`).then(safe),
-      apiFetch(`/api/resources`).then(safe),
-      apiFetch(`/api/rules`).then(safe),
-    ]).then(([s, u, res, r]) => {
-      if (isSystemAdmin) {
-        const cid = Number(form.clinic_id);
-        setServices(s.filter((x) => x.clinic_id === cid));
-        setResources(res.filter((x) => x.clinic_id === cid));
-        setUsers(u.filter((x) => x.clinic_id === cid));
-        setRules(r.filter((x) => x.clinic_id === cid));
-      } else {
-        setServices(s);
-        setUsers(u);
-        setResources(res);
-        setRules(r);
-      }
-    }).catch(() => {});
-  }, [open, isSystemAdmin ? form.clinic_id : null]);
+  const clinicFilter = isSystemAdmin ? form.clinic_id : null;
+  const services = useMemo(
+    () => (isSystemAdmin ? forClinic(allServices, clinicFilter) : allServices),
+    [allServices, clinicFilter, forClinic, isSystemAdmin]
+  );
+  const users = useMemo(
+    () => (isSystemAdmin ? forClinic(allStaff, clinicFilter) : allStaff),
+    [allStaff, clinicFilter, forClinic, isSystemAdmin]
+  );
+  const resources = useMemo(
+    () => (isSystemAdmin ? forClinic(allResources, clinicFilter) : allResources),
+    [allResources, clinicFilter, forClinic, isSystemAdmin]
+  );
+  const rules = useMemo(
+    () => (isSystemAdmin ? forClinic(allRules, clinicFilter) : allRules),
+    [allRules, clinicFilter, forClinic, isSystemAdmin]
+  );
 
   function resetState() {
     setForm(EMPTY_FORM);
@@ -124,6 +115,24 @@ export default function BookingModal({ open, onClose, onBooked }) {
     });
   }
 
+  function staffOptionsForRow(idx) {
+    const taken = new Set(
+      form.staff_allocations
+        .map((r, i) => (i !== idx && r.user_id ? String(r.user_id) : null))
+        .filter(Boolean)
+    );
+    return users.filter((u) => !taken.has(String(u.id)));
+  }
+
+  function resourceOptionsForRow(idx) {
+    const taken = new Set(
+      form.resource_allocations
+        .map((r, i) => (i !== idx && r.resource_id ? String(r.resource_id) : null))
+        .filter(Boolean)
+    );
+    return resources.filter((r) => !taken.has(String(r.id)));
+  }
+
   function addResourceRow() {
     setForm((f) => ({
       ...f,
@@ -155,7 +164,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
     return {
       ...(isSystemAdmin && form.clinic_id ? { clinic_id: Number(form.clinic_id) } : {}),
       service_id: Number(form.service_id),
-      start_time: form.start_time,
+      start_time: localDatetimeToUtcIso(form.start_time),
       client_name: form.client_name,
       patient_name: form.patient_name,
       allocations: [
@@ -191,6 +200,10 @@ export default function BookingModal({ open, onClose, onBooked }) {
       return;
     }
     if (isSystemAdmin && !form.clinic_id) {
+      setLivePreview(null);
+      return;
+    }
+    if (isPastLocalDatetime(form.start_time)) {
       setLivePreview(null);
       return;
     }
@@ -230,6 +243,26 @@ export default function BookingModal({ open, onClose, onBooked }) {
     setSubmitting(true);
     setError(null);
 
+    if (isPastLocalDatetime(form.start_time)) {
+      setSubmitting(false);
+      setError({ type: "generic", message: "Start time cannot be in the past." });
+      return;
+    }
+
+    const staffIds = form.staff_allocations.map((a) => a.user_id).filter(Boolean);
+    if (new Set(staffIds).size !== staffIds.length) {
+      setSubmitting(false);
+      setError({ type: "generic", message: "Each staff member can only be added once." });
+      return;
+    }
+
+    const resourceIds = form.resource_allocations.map((a) => a.resource_id).filter(Boolean);
+    if (new Set(resourceIds).size !== resourceIds.length) {
+      setSubmitting(false);
+      setError({ type: "generic", message: "Each resource can only be added once." });
+      return;
+    }
+
     let res;
     try {
       res = await apiFetch("/api/appointments", {
@@ -267,7 +300,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
       setError({ type: "hard_stop", violations: detail.violations });
       return;
     }
-    setError({ type: "generic", message: JSON.stringify(detail) });
+    setError({ type: "generic", message: typeof detail === "string" ? detail : JSON.stringify(detail) });
   }
 
   const hasSoftStop = softViolations && softViolations.length > 0;
@@ -285,7 +318,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
         </DialogHeader>
 
         <div className="space-y-4 py-2">
-          {/* Clinic — SYSTEM_ADMIN only */}
           {isSystemAdmin && (
             <div className="space-y-1">
               <Label>Clinic</Label>
@@ -295,7 +327,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
                   setForm((f) => ({
                     ...f,
                     clinic_id: v,
-                    // Reset any selected staff/resources — they belong to the old clinic
                     service_id: "",
                     staff_allocations: [],
                     resource_allocations: [],
@@ -313,7 +344,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
             </div>
           )}
 
-          {/* Service */}
           <div className="space-y-1">
             <Label>Service</Label>
             <Select
@@ -332,44 +362,38 @@ export default function BookingModal({ open, onClose, onBooked }) {
             </Select>
           </div>
 
-          {/* Service requirements */}
           {form.service_id && (() => {
-            const serviceRules = rules.filter((r) => r.service_id === Number(form.service_id));
+            const serviceRules = rules.filter((r) => r.service_id === Number(form.service_id) && r.is_active !== false);
             if (!serviceRules.length) return null;
             return (
-              <div className="rounded-md border bg-muted/40 px-3 py-2 space-y-1.5">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              <Alert>
+                <AlertTitle className="uppercase tracking-wide text-muted-foreground">
                   Requirements for this service
-                </p>
+                </AlertTitle>
                 {serviceRules.map((r) => (
                   <div key={r.id} className="flex items-start gap-2">
-                    <Badge
-                      variant="outline"
-                      className={r.is_hard_stop
-                        ? "border-destructive text-destructive shrink-0"
-                        : "border-amber-400 text-amber-700 shrink-0"}
-                    >
+                    <Badge variant={r.is_hard_stop ? "destructive" : "warning"} className="shrink-0">
                       {r.is_hard_stop ? "Required" : "Recommended"}
                     </Badge>
                     <p className="text-xs text-foreground leading-tight">{r.description}</p>
                   </div>
                 ))}
-              </div>
+              </Alert>
             );
           })()}
 
-          {/* Start Time */}
           <div className="space-y-1">
             <Label>Start Time</Label>
             <Input
               type="datetime-local"
               value={form.start_time}
+              min={minStart}
+              onFocus={() => setMinStart(toLocalDatetimeValue(new Date()))}
               onChange={(e) => setForm((f) => ({ ...f, start_time: e.target.value }))}
               disabled={formLocked}
             />
           </div>
 
-          {/* Client / Patient */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label>Client Name</Label>
@@ -389,7 +413,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
             </div>
           </div>
 
-          {/* Staff Allocations */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>Staff Allocations</Label>
@@ -398,7 +421,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 variant="outline"
                 size="sm"
                 onClick={addStaffRow}
-                disabled={formLocked}
+                disabled={formLocked || staffOptionsForRow(-1).length === 0}
                 className="h-7 gap-1 text-xs"
               >
                 <Plus className="h-3 w-3" /> Add Staff
@@ -434,7 +457,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                             <SelectValue placeholder="Select staff…" />
                           </SelectTrigger>
                           <SelectContent>
-                            {users.map((u) => (
+                            {staffOptionsForRow(idx).map((u) => (
                               <SelectItem key={u.id} value={String(u.id)}>
                                 {u.name}{u.role ? ` · ${u.role.name}` : ""}
                               </SelectItem>
@@ -493,7 +516,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
             )}
           </div>
 
-          {/* Resource Allocations */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>Resource Allocations</Label>
@@ -502,7 +524,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 variant="outline"
                 size="sm"
                 onClick={addResourceRow}
-                disabled={formLocked}
+                disabled={formLocked || resourceOptionsForRow(-1).length === 0}
                 className="h-7 gap-1 text-xs"
               >
                 <Plus className="h-3 w-3" /> Add Resource
@@ -537,7 +559,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                             <SelectValue placeholder="Select resource…" />
                           </SelectTrigger>
                           <SelectContent>
-                            {resources.map((r) => (
+                            {resourceOptionsForRow(idx).map((r) => (
                               <SelectItem key={r.id} value={String(r.id)}>
                                 {r.name} ({r.resource_type})
                               </SelectItem>
@@ -580,74 +602,71 @@ export default function BookingModal({ open, onClose, onBooked }) {
             )}
           </div>
 
-          {/* Live rule preview */}
           {livePreview && !formLocked && !error && (
             <div className="space-y-2">
               {livePreview.hard_violations?.length > 0 && (
-                <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 space-y-1">
-                  <p className="text-xs font-medium text-destructive">Would be blocked</p>
+                <Alert variant="destructive">
+                  <AlertTitle>Would be blocked</AlertTitle>
                   {livePreview.hard_violations.map((v) => (
-                    <p key={v.rule_id} className="text-xs text-destructive">{v.description}</p>
+                    <AlertDescription key={v.rule_id}>{v.description}</AlertDescription>
                   ))}
-                </div>
+                </Alert>
               )}
               {livePreview.soft_violations?.length > 0 && (
-                <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 space-y-1">
-                  <p className="text-xs font-medium text-amber-700">Would need override</p>
+                <Alert variant="warning">
+                  <AlertTitle>Would need override</AlertTitle>
                   {livePreview.soft_violations.map((v) => (
-                    <p key={v.rule_id} className="text-xs text-amber-800">{v.description}</p>
+                    <AlertDescription key={v.rule_id}>{v.description}</AlertDescription>
                   ))}
-                </div>
+                </Alert>
               )}
               {livePreview.double_booking_conflicts?.length > 0 && (
-                <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 space-y-1">
-                  <p className="text-xs font-medium text-red-700">Double-booking risk</p>
+                <Alert variant="destructive">
+                  <AlertTitle>Double-booking risk</AlertTitle>
                   {livePreview.double_booking_conflicts.map((c, i) => (
-                    <p key={i} className="text-xs text-red-700">{c.entity} is already booked</p>
+                    <AlertDescription key={i}>{c.entity} is already booked</AlertDescription>
                   ))}
-                </div>
+                </Alert>
               )}
               {livePreview.valid && (
-                <p className="text-xs text-green-700">Looks good — no rule violations detected.</p>
+                <Alert variant="success">
+                  <AlertDescription>Looks good — no rule violations detected.</AlertDescription>
+                </Alert>
               )}
             </div>
           )}
 
-          {/* Hard stop */}
           {error?.type === "hard_stop" && (
-            <div className="rounded-md border border-destructive bg-destructive/10 p-3 space-y-2">
-              <div className="flex items-center gap-2 text-destructive font-semibold">
+            <Alert variant="destructive" className="p-3 space-y-2">
+              <div className="flex items-center gap-2 font-semibold text-sm">
                 <ShieldAlert className="h-4 w-4" />
                 Booking Blocked — Hard Stop
               </div>
               {error.violations.map((v) => (
-                <p key={v.rule_id} className="text-sm text-destructive">{v.description}</p>
+                <AlertDescription key={v.rule_id} className="text-sm">{v.description}</AlertDescription>
               ))}
-            </div>
+            </Alert>
           )}
 
           {error?.type === "generic" && (
             <p className="text-sm text-destructive">{error.message}</p>
           )}
 
-          {/* Double-booking warning */}
           {hasDoubleBooking && (
-            <div className="rounded-md border-2 border-red-500 bg-red-50 p-3 space-y-3">
-              <div className="flex items-center gap-2 text-red-700 font-bold">
+            <Alert variant="destructive" className="border-2 p-3 space-y-3">
+              <div className="flex items-center gap-2 font-bold text-sm">
                 <AlertTriangle className="h-4 w-4" />
                 Double-Booking Conflict Detected
               </div>
               {doubleBookingConflicts.map((c, i) => (
-                <p key={i} className="text-sm text-red-700">
+                <AlertDescription key={i} className="text-sm">
                   <strong>{c.entity}</strong> is already scheduled during this time.
-                </p>
+                </AlertDescription>
               ))}
               <div className="space-y-1 pt-1">
-                <Label className="text-red-700">
-                  Who is authorizing this override? (required for audit log)
-                </Label>
+                <Label>Who is authorizing this override? (required for audit log)</Label>
                 <Select value={overridingUserId} onValueChange={setOverridingUserId}>
-                  <SelectTrigger className="border-red-400">
+                  <SelectTrigger>
                     <SelectValue placeholder="Select authorizing staff member…" />
                   </SelectTrigger>
                   <SelectContent>
@@ -659,30 +678,25 @@ export default function BookingModal({ open, onClose, onBooked }) {
                   </SelectContent>
                 </Select>
               </div>
-            </div>
+            </Alert>
           )}
 
-          {/* Soft stop override */}
           {hasSoftStop && !hasDoubleBooking && (
-            <div className="rounded-md border border-amber-400 bg-amber-50 p-3 space-y-3">
-              <div className="flex items-center gap-2 text-amber-700 font-semibold">
+            <Alert variant="warning" className="p-3 space-y-3">
+              <div className="flex items-center gap-2 font-semibold text-sm">
                 <AlertTriangle className="h-4 w-4" />
                 Scheduling Warning — Override Required
               </div>
               {softViolations.map((v) => (
                 <div key={v.rule_id} className="flex items-start gap-2">
-                  <Badge variant="outline" className="border-amber-400 text-amber-700 shrink-0">
-                    Soft Stop
-                  </Badge>
-                  <p className="text-sm text-amber-800">{v.description}</p>
+                  <Badge variant="warning" className="shrink-0">Soft Stop</Badge>
+                  <p className="text-sm">{v.description}</p>
                 </div>
               ))}
               <div className="space-y-1 pt-1">
-                <Label className="text-amber-700">
-                  Who is authorizing this override? (required for audit log)
-                </Label>
+                <Label>Who is authorizing this override? (required for audit log)</Label>
                 <Select value={overridingUserId} onValueChange={setOverridingUserId}>
-                  <SelectTrigger className="border-amber-400">
+                  <SelectTrigger>
                     <SelectValue placeholder="Select authorizing staff member…" />
                   </SelectTrigger>
                   <SelectContent>
@@ -694,7 +708,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                   </SelectContent>
                 </Select>
               </div>
-            </div>
+            </Alert>
           )}
         </div>
 

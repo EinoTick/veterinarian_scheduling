@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -17,6 +18,7 @@ const ROLE_BADGE = {
 
 export default function UsersPage() {
   const { apiFetch, user: currentUser } = useAuth();
+  const { invalidate } = useCatalog();
   const [users, setUsers] = useState([]);
   const [loadError, setLoadError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -57,6 +59,7 @@ export default function UsersPage() {
       return;
     }
     setLoadError(null);
+    invalidate(["staff"]);
     loadUsers();
   }
 

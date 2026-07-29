@@ -7,6 +7,8 @@ import {
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
+import AppointmentDetailDialog from "@/components/AppointmentDetailDialog";
 
 const TYPE_COLORS = {
   room: "#6366f1",
@@ -15,31 +17,39 @@ const TYPE_COLORS = {
 
 export default function ResourceSchedule() {
   const { apiFetch } = useAuth();
-  const [resources, setResources] = useState([]);
+  const { resources, ensure } = useCatalog();
   const [selectedId, setSelectedId] = useState("");
   const [events, setEvents] = useState([]);
   const [error, setError] = useState(null);
+  const [selectedEvent, setSelectedEvent] = useState(null);
   const dateRangeRef = useRef(null);
+  const fetchSeq = useRef(0);
+  const abortRef = useRef(null);
 
   useEffect(() => {
-    apiFetch("/api/resources")
-      .then((r) => (r.ok ? r.json() : []))
-      .then(setResources)
-      .catch(() => {});
-  }, []);
+    ensure(["resources"]).catch(() => {});
+  }, [ensure]);
 
   async function fetchSchedule(resourceId, startStr, endStr) {
     if (!resourceId) return;
     setError(null);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const seq = ++fetchSeq.current;
+
     try {
       const res = await apiFetch(
-        `/api/resources/${resourceId}/schedule?start=${encodeURIComponent(startStr)}&end=${encodeURIComponent(endStr)}`
+        `/api/resources/${resourceId}/schedule?start=${encodeURIComponent(startStr)}&end=${encodeURIComponent(endStr)}`,
+        { signal: controller.signal }
       );
+      if (seq !== fetchSeq.current) return;
       if (!res.ok) {
         setError("Failed to load schedule.");
         return;
       }
       const data = await res.json();
+      if (seq !== fetchSeq.current) return;
       const selected = resources.find((r) => String(r.id) === String(resourceId));
       const color = TYPE_COLORS[selected?.resource_type] ?? "#6b7280";
       setEvents(
@@ -50,11 +60,20 @@ export default function ResourceSchedule() {
           end: e.end_time,
           backgroundColor: color,
           borderColor: "transparent",
-          extendedProps: { client_name: e.client_name },
+          extendedProps: {
+            appointment_id: e.appointment_id,
+            client_name: e.client_name,
+            patient_name: e.patient_name,
+            service_name: e.service_name,
+            status: e.status,
+            start_time: e.start_time,
+            end_time: e.end_time,
+          },
         }))
       );
-    } catch {
-      setError("Network error — is the backend running?");
+    } catch (err) {
+      if (err?.name === "AbortError") return;
+      if (seq === fetchSeq.current) setError("Network error — is the backend running?");
     }
   }
 
@@ -71,13 +90,27 @@ export default function ResourceSchedule() {
     }
   }
 
+  function handleEventClick(info) {
+    const p = info.event.extendedProps;
+    if (!p?.appointment_id) return;
+    setSelectedEvent({
+      appointment_id: p.appointment_id,
+      patient_name: p.patient_name,
+      client_name: p.client_name,
+      service_name: p.service_name,
+      status: p.status,
+      start_time: p.start_time,
+      end_time: p.end_time,
+    });
+  }
+
   const selectedResource = resources.find((r) => String(r.id) === selectedId);
 
   return (
     <div>
       <h1 className="text-xl font-semibold mb-1">Rooms & Equipment</h1>
       <p className="text-sm text-muted-foreground mb-4">
-        View booking blocks for a specific room or piece of equipment.
+        View booking blocks for a specific room or piece of equipment. Click an event for details.
       </p>
 
       <div className="mb-5 max-w-xs">
@@ -131,17 +164,32 @@ export default function ResourceSchedule() {
               }}
               events={events}
               datesSet={handleDatesSet}
+              eventClick={handleEventClick}
               height="auto"
               firstDay={1}
-          slotMinTime="07:00:00"
+              slotMinTime="07:00:00"
               slotMaxTime="20:00:00"
               nowIndicator={true}
               allDaySlot={false}
               eventContent={(arg) => (
-                <div className="px-1 py-0.5 overflow-hidden h-full">
+                <div
+                  className="px-1 py-0.5 overflow-hidden h-full cursor-pointer"
+                  style={{
+                    opacity:
+                      arg.event.extendedProps.status === "completed"
+                      || arg.event.extendedProps.status === "no_show"
+                        ? 0.55
+                        : 1,
+                  }}
+                >
                   <div className="font-semibold text-xs leading-tight text-white truncate">
                     {arg.event.title}
                   </div>
+                  {arg.event.extendedProps.status && arg.event.extendedProps.status !== "scheduled" && (
+                    <div className="text-[10px] uppercase tracking-wide text-white/90 truncate">
+                      {arg.event.extendedProps.status.replaceAll("_", " ")}
+                    </div>
+                  )}
                   {arg.event.extendedProps.client_name && (
                     <div className="text-xs text-white/70 truncate">
                       {arg.event.extendedProps.client_name}
@@ -153,6 +201,18 @@ export default function ResourceSchedule() {
           </div>
         </>
       )}
+
+      <AppointmentDetailDialog
+        open={!!selectedEvent}
+        appointmentId={selectedEvent?.appointment_id}
+        seed={selectedEvent}
+        onClose={() => setSelectedEvent(null)}
+        onChanged={() => {
+          if (dateRangeRef.current && selectedId) {
+            fetchSchedule(selectedId, dateRangeRef.current.start, dateRangeRef.current.end);
+          }
+        }}
+      />
     </div>
   );
 }

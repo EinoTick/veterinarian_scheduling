@@ -1,9 +1,9 @@
-from datetime import datetime
-
 from sqlalchemy import (
-    JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint,
+    JSON, Boolean, Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+from timeutil import utc_now
 
 
 class Base(DeclarativeBase):
@@ -11,9 +11,9 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
     updated_at = Column(
-        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, nullable=False, default=utc_now, onupdate=utc_now
     )
 
 
@@ -26,6 +26,8 @@ class Clinic(Base, TimestampMixin):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
+    # IANA timezone name for display / local business hours (storage remains UTC).
+    timezone = Column(String, nullable=False, default="UTC")
 
     users = relationship("User", back_populates="clinic", foreign_keys="User.clinic_id")
     resources = relationship("Resource", back_populates="clinic")
@@ -97,7 +99,7 @@ class RefreshToken(Base):
     token_hash = Column(String, nullable=False, unique=True, index=True)
     expires_at = Column(DateTime, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
     user_agent = Column(String, nullable=True)
 
     user = relationship("User", back_populates="refresh_tokens")
@@ -203,6 +205,9 @@ class Rule(Base, AuditMixin):
 
 class Appointment(Base, AuditMixin):
     __tablename__ = "appointments"
+    __table_args__ = (
+        Index("ix_appointments_clinic_start", "clinic_id", "start_time"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False)
@@ -231,6 +236,12 @@ class Appointment(Base, AuditMixin):
 
 class AppointmentAllocation(Base, TimestampMixin):
     __tablename__ = "appointment_allocations"
+    __table_args__ = (
+        # Double-booking + schedule views filter/range on these columns.
+        Index("ix_alloc_user_start_end", "user_id", "start_time", "end_time"),
+        Index("ix_alloc_resource_start_end", "resource_id", "start_time", "end_time"),
+        Index("ix_alloc_appointment_id", "appointment_id"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=False)
@@ -261,7 +272,7 @@ class OverrideLog(Base):
     overridden_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     override_type = Column(String, nullable=False, default="soft_stop")
     notes = Column(String, nullable=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=utc_now)
 
     appointment = relationship("Appointment", back_populates="override_logs")
     rule = relationship("Rule", back_populates="override_logs")

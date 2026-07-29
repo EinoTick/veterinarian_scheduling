@@ -36,12 +36,15 @@ from models import (
     Patient, Resource, Role, Rule, Service, User,
 )
 from schemas import (
-    AppointmentCreate, AppointmentOut, AppointmentUpdate, AppointmentValidateOut,
-    AuthSessionOut, ClinicOut, PasswordChange, ResourceOut, RoleOut, RuleCreate,
-    RuleOut, RuleUpdate, ServiceOut, SoftStopResponse, UserCreate, UserOut,
-    ViolationDetail,
+    AppointmentCreate, AppointmentListOut, AppointmentOut, AppointmentUpdate,
+    AppointmentValidateOut, AuthSessionOut, ClinicOut, PasswordChange, ResourceOut,
+    RoleOut, RuleCreate, RuleOut, RuleUpdate, ScheduleEventOut, ServiceOut, SoftStopResponse,
+    UserCreate, UserOut, ViolationDetail,
 )
 from catalog_routes import router as catalog_router
+from errors import http_internal_error, log_event
+from logging_config import setup_logging
+from timeutil import to_utc_naive, utc_now
 
 app = FastAPI(title="VetClinic Scheduler")
 
@@ -73,7 +76,7 @@ def seed_db(db: Session):
         return
 
     # Demo clinic
-    clinic = Clinic(name="Riverside Animal Hospital")
+    clinic = Clinic(name="Riverside Animal Hospital", timezone="UTC")
     db.add(clinic)
     db.flush()
 
@@ -289,15 +292,45 @@ def run_migrations(db: Session):
     for stmt in stmts:
         try:
             conn.execute(text(stmt))
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event(
+                "legacy_migration_stmt_failed",
+                level=30,
+                msg=f"Legacy run_migrations statement failed (continuing): {exc}",
+                detail=stmt[:120],
+            )
     db.commit()
+
+
+def run_alembic_migrations() -> None:
+    """Apply versioned Alembic migrations (preferred path for schema changes)."""
+    from pathlib import Path
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(Path(__file__).resolve().parent / "alembic.ini"))
+    command.upgrade(cfg, "head")
 
 
 @app.on_event("startup")
 def on_startup():
+    setup_logging()
+    log_event("app_startup", msg="VetClinic API starting")
+    # Legacy idempotent column backfills (logged, not silent). New changes → Alembic.
     with SessionLocal() as db:
         run_migrations(db)
+    try:
+        run_alembic_migrations()
+    except Exception as exc:
+        log_event(
+            "alembic_upgrade_failed",
+            level=40,
+            msg=f"Alembic upgrade failed: {exc}",
+        )
+        raise
+    # Re-assert app logging in case any dependency touched root handlers.
+    setup_logging()
+    with SessionLocal() as db:
         seed_db(db)
 
 
@@ -334,6 +367,7 @@ def login(
     if not user:
         run_dummy_password_check(form.password)
         record_login_failure(email)
+        log_event("login_failed", level=30, email=email, ip=ip, detail="unknown_email")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
@@ -342,6 +376,7 @@ def login(
 
     if not verify_password(form.password, user.hashed_password):
         record_login_failure(email)
+        log_event("login_failed", level=30, email=email, ip=ip, user_id=user.id, detail="bad_password")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
@@ -350,6 +385,7 @@ def login(
 
     if not user.is_active:
         # Valid credentials, disabled account — same client message, no lockout bump.
+        log_event("login_failed", level=30, email=email, ip=ip, user_id=user.id, detail="inactive")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
@@ -357,6 +393,7 @@ def login(
         )
 
     record_login_success(email)
+    log_event("login_success", user_id=user.id, email=email, ip=ip, clinic_id=user.clinic_id)
     issue_session(
         response,
         db,
@@ -368,7 +405,7 @@ def login(
     except Exception as exc:
         db.rollback()
         clear_auth_cookies(response)
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="auth_session")
     return AuthSessionOut(authenticated=True)
 
 
@@ -383,8 +420,9 @@ def refresh_session(
     if consume_status != "ok" or row is None:
         try:
             db.commit()  # persist reuse-triggered mass revoke, if any
-        except Exception:
+        except Exception as exc:
             db.rollback()
+            log_event("auth_refresh_commit_failed", level=40, msg=str(exc), detail=consume_status)
         clear_auth_cookies(response)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -395,8 +433,9 @@ def refresh_session(
     if not user or not user.is_active:
         try:
             db.commit()
-        except Exception:
+        except Exception as exc:
             db.rollback()
+            log_event("auth_refresh_commit_failed", level=40, msg=str(exc), detail="inactive_user")
         clear_auth_cookies(response)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -414,7 +453,7 @@ def refresh_session(
     except Exception as exc:
         db.rollback()
         clear_auth_cookies(response)
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="auth_session")
     return AuthSessionOut(authenticated=True)
 
 
@@ -431,8 +470,9 @@ def logout(
             revoke_refresh_token(row)
             try:
                 db.commit()
-            except Exception:
+            except Exception as exc:
                 db.rollback()
+                log_event("auth_logout_commit_failed", level=40, msg=str(exc))
     clear_auth_cookies(response)
     return AuthSessionOut(authenticated=False)
 
@@ -460,7 +500,7 @@ def change_password(
     except Exception as exc:
         db.rollback()
         clear_auth_cookies(response)
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="auth_session")
     return {"ok": True}
 
 
@@ -520,7 +560,7 @@ def create_user(
         if role.clinic_id is not None and role.clinic_id != target_clinic_id:
             raise HTTPException(400, "Clinical role does not belong to the target clinic.")
 
-    now = datetime.utcnow()
+    now = utc_now()
     try:
         user = User(
             name=payload.name,
@@ -539,7 +579,7 @@ def create_user(
         db.refresh(user)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="db_write")
 
     return user
 
@@ -583,7 +623,7 @@ def create_rule(
         db.refresh(rule)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="db_write")
 
     return rule
 
@@ -650,7 +690,7 @@ def update_rule(
             active_end_time=rule.active_end_time,
         )
     except Exception as exc:
-        raise HTTPException(400, detail=str(exc)) from exc
+        raise HTTPException(400, detail="Invalid rule update payload.") from exc
 
     _validate_rule_refs(probe, rule.clinic_id, db)
 
@@ -659,7 +699,7 @@ def update_rule(
         db.refresh(rule)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="db_write")
     return rule
 
 
@@ -690,7 +730,7 @@ def delete_rule(
                 "Cannot permanently delete this rule (it may be referenced by override logs). "
                 "Deactivate it instead, or pass hard=false.",
             ) from exc
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="db_write")
     return Response(status_code=204)
 
 
@@ -1053,7 +1093,7 @@ def _validate_appointment_inputs(
                     400, f"Resource '{alloc_resource.name}' does not belong to the target clinic."
                 )
 
-    appt_start = _naive(payload.start_time)
+    appt_start = to_utc_naive(payload.start_time)
     violations = _evaluate_rules(
         payload.service_id,
         payload.allocations,
@@ -1078,10 +1118,6 @@ def _validate_appointment_inputs(
 
 
 # ── Appointments ──────────────────────────────────────────────────────────────
-
-def _naive(dt: datetime) -> datetime:
-    return dt.replace(tzinfo=None) if dt.tzinfo else dt
-
 
 ALLOWED_STATUS_TRANSITIONS = {
     "scheduled": {"completed", "cancelled", "no_show"},
@@ -1144,8 +1180,8 @@ def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Ses
                 clinic_id=clinic_id,
                 name=payload.client_name.strip(),
                 is_active=True,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=utc_now(),
+                updated_at=utc_now(),
                 created_by_user_id=current_user.id,
             )
             db.add(client)
@@ -1177,8 +1213,8 @@ def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Ses
                 client_id=client.id,
                 name=payload.patient_name.strip(),
                 is_active=True,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=utc_now(),
+                updated_at=utc_now(),
                 created_by_user_id=current_user.id,
             )
             db.add(patient)
@@ -1194,19 +1230,50 @@ def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Ses
     )
 
 
-@app.get("/api/appointments", response_model=List[AppointmentOut])
+@app.get("/api/appointments", response_model=AppointmentListOut)
 def list_appointments(
     status: Optional[str] = Query(None),
     include_cancelled: bool = Query(False),
+    start: Optional[datetime] = Query(
+        None, description="Inclusive lower bound on appointment start_time (UTC)."
+    ),
+    end: Optional[datetime] = Query(
+        None, description="Exclusive upper bound on appointment start_time (UTC)."
+    ),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Default window when callers omit bounds — avoids loading unbounded history.
+    if start is None and end is None:
+        now = utc_now()
+        start = now - timedelta(days=7)
+        end = now + timedelta(days=60)
+
+    start_bound = to_utc_naive(start) if start is not None else None
+    end_bound = to_utc_naive(end) if end is not None else None
+    if start_bound is not None and end_bound is not None and start_bound >= end_bound:
+        raise HTTPException(400, "Query param 'start' must be earlier than 'end'.")
+
     q = clinic_filter(db.query(Appointment), Appointment, current_user)
     if status:
         q = q.filter(Appointment.status == status)
     elif not include_cancelled:
         q = q.filter(Appointment.status != "cancelled")
-    return q.order_by(Appointment.start_time).all()
+    if start_bound is not None:
+        q = q.filter(Appointment.start_time >= start_bound)
+    if end_bound is not None:
+        q = q.filter(Appointment.start_time < end_bound)
+
+    total = q.count()
+    items = (
+        q.order_by(Appointment.start_time.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return AppointmentListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @app.get("/api/appointments/{appointment_id}", response_model=AppointmentOut)
@@ -1254,12 +1321,26 @@ def create_appointment(
     service_duration = service.default_duration_minutes
 
     if hard_violations:
+        log_event(
+            "booking_hard_stop",
+            level=30,
+            user_id=current_user.id,
+            clinic_id=clinic_id,
+            detail=f"{len(hard_violations)} violation(s)",
+        )
         raise HTTPException(400, detail={
             "type": "hard_stop",
             "violations": [v.model_dump() for v in hard_violations],
         })
 
     if soft_violations and not payload.override:
+        log_event(
+            "booking_soft_stop",
+            level=30,
+            user_id=current_user.id,
+            clinic_id=clinic_id,
+            detail=f"{len(soft_violations)} violation(s)",
+        )
         raise HTTPException(422, detail={
             "type": "soft_stop",
             "violations": [v.model_dump() for v in soft_violations],
@@ -1271,6 +1352,13 @@ def create_appointment(
         )
 
     if conflicts and not payload.override_double_booking:
+        log_event(
+            "booking_double_booking",
+            level=30,
+            user_id=current_user.id,
+            clinic_id=clinic_id,
+            detail=f"{len(conflicts)} conflict(s)",
+        )
         raise HTTPException(400, detail={
             "type": "double_booking",
             "conflicts": conflicts,
@@ -1288,7 +1376,7 @@ def create_appointment(
     ):
         _assert_override_authorizer(payload.overriding_user_id, clinic_id, db)
 
-    start_time = _naive(payload.start_time)
+    start_time = to_utc_naive(payload.start_time)
     # Always lock overlapping allocation rows, then re-check under the lock.
     appt_end = start_time + timedelta(minutes=service_duration)
     for alloc_data in payload.allocations:
@@ -1324,7 +1412,7 @@ def create_appointment(
         payload, clinic_id, current_user, db
     )
     end_time = start_time + timedelta(minutes=service_duration)
-    now = datetime.utcnow()
+    now = utc_now()
     appt = Appointment(
         clinic_id=clinic_id,
         service_id=payload.service_id,
@@ -1367,6 +1455,14 @@ def create_appointment(
                     override_type="soft_stop",
                     timestamp=now,
                 ))
+            log_event(
+                "booking_override",
+                user_id=current_user.id,
+                clinic_id=clinic_id,
+                appointment_id=appt.id,
+                override_type="soft_stop",
+                detail=f"authorizer={payload.overriding_user_id} rules={len(soft_violations)}",
+            )
 
         # Only audit when an actual conflict was overridden
         if payload.override_double_booking and conflicts and payload.overriding_user_id:
@@ -1379,11 +1475,19 @@ def create_appointment(
                 notes=f"Overrode conflicts: {names}",
                 timestamp=now,
             ))
+            log_event(
+                "booking_override",
+                user_id=current_user.id,
+                clinic_id=clinic_id,
+                appointment_id=appt.id,
+                override_type="double_booking",
+                detail=names,
+            )
 
         db.commit()
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="db_write")
 
     db.refresh(appt)
     return AppointmentOut.model_validate(appt)
@@ -1410,7 +1514,7 @@ def update_appointment(
     if status_only:
         if "status" in data:
             _apply_status_transition(appt, data["status"])
-        appt.updated_at = datetime.utcnow()
+        appt.updated_at = utc_now()
         db.commit()
         db.refresh(appt)
         return appt
@@ -1418,7 +1522,7 @@ def update_appointment(
     if appt.status == "cancelled":
         raise HTTPException(400, "Cancelled appointments cannot be rescheduled; create a new one.")
 
-    start_time = _naive(payload.start_time) if payload.start_time else appt.start_time
+    start_time = to_utc_naive(payload.start_time) if payload.start_time else appt.start_time
     service_id = payload.service_id or appt.service_id
     allocations = payload.allocations
     if allocations is None:
@@ -1525,12 +1629,12 @@ def update_appointment(
     appt.patient_id = patient_id
     appt.client_name = client_name
     appt.patient_name = patient_name
-    appt.updated_at = datetime.utcnow()
+    appt.updated_at = utc_now()
 
     for old in list(appt.allocations):
         db.delete(old)
     db.flush()
-    now = datetime.utcnow()
+    now = utc_now()
     for alloc_data in allocations:
         offset = alloc_data.start_offset_minutes or 0
         duration = alloc_data.duration_minutes or service_duration
@@ -1554,6 +1658,14 @@ def update_appointment(
                 override_type="soft_stop",
                 timestamp=now,
             ))
+        log_event(
+            "booking_override",
+            user_id=current_user.id,
+            clinic_id=appt.clinic_id,
+            appointment_id=appt.id,
+            override_type="soft_stop",
+            detail=f"authorizer={payload.overriding_user_id} rules={len(soft)}",
+        )
     if payload.override_double_booking and conflicts and payload.overriding_user_id:
         names = ", ".join(c["entity"] for c in conflicts)
         db.add(OverrideLog(
@@ -1564,13 +1676,21 @@ def update_appointment(
             notes=f"Overrode conflicts: {names}",
             timestamp=now,
         ))
+        log_event(
+            "booking_override",
+            user_id=current_user.id,
+            clinic_id=appt.clinic_id,
+            appointment_id=appt.id,
+            override_type="double_booking",
+            detail=names,
+        )
 
     try:
         db.commit()
         db.refresh(appt)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="db_write")
     return appt
 
 
@@ -1586,13 +1706,13 @@ def cancel_appointment(
     if current_user.system_role != "SYSTEM_ADMIN" and appt.clinic_id != current_user.clinic_id:
         raise HTTPException(403, "Access denied.")
     _apply_status_transition(appt, "cancelled")
-    appt.updated_at = datetime.utcnow()
+    appt.updated_at = utc_now()
     db.commit()
     db.refresh(appt)
     return appt
 
 
-@app.get("/api/users/{user_id}/schedule")
+@app.get("/api/users/{user_id}/schedule", response_model=List[ScheduleEventOut])
 def get_user_schedule(
     user_id: int,
     start: datetime = Query(...),
@@ -1614,8 +1734,8 @@ def get_user_schedule(
             raise HTTPException(403, "Access denied.")
 
     # Normalize to naive datetimes since the DB stores without TZ
-    start_naive = start.replace(tzinfo=None)
-    end_naive = end.replace(tzinfo=None)
+    start_naive = to_utc_naive(start)
+    end_naive = to_utc_naive(end)
 
     allocations = (
         db.query(AppointmentAllocation)
@@ -1634,21 +1754,22 @@ def get_user_schedule(
     for alloc in allocations:
         appt = alloc.appointment
         service = db.get(Service, appt.service_id)
-        result.append({
-            "allocation_id": alloc.id,
-            "appointment_id": appt.id,
-            "start_time": alloc.start_time.isoformat(),
-            "end_time": alloc.end_time.isoformat(),
-            "presence_type": alloc.presence_type,
-            "client_name": appt.client_name,
-            "patient_name": appt.patient_name,
-            "service_name": service.name if service else "Unknown",
-        })
+        result.append(ScheduleEventOut(
+            allocation_id=alloc.id,
+            appointment_id=appt.id,
+            start_time=alloc.start_time,
+            end_time=alloc.end_time,
+            presence_type=alloc.presence_type,
+            client_name=appt.client_name,
+            patient_name=appt.patient_name,
+            service_name=service.name if service else "Unknown",
+            status=appt.status,
+        ))
 
     return result
 
 
-@app.get("/api/resources/{resource_id}/schedule")
+@app.get("/api/resources/{resource_id}/schedule", response_model=List[ScheduleEventOut])
 def get_resource_schedule(
     resource_id: int,
     start: datetime = Query(...),
@@ -1662,8 +1783,8 @@ def get_resource_schedule(
     if current_user.system_role != "SYSTEM_ADMIN" and resource.clinic_id != current_user.clinic_id:
         raise HTTPException(403, "Access denied.")
 
-    start_naive = start.replace(tzinfo=None)
-    end_naive = end.replace(tzinfo=None)
+    start_naive = to_utc_naive(start)
+    end_naive = to_utc_naive(end)
 
     allocations = (
         db.query(AppointmentAllocation)
@@ -1682,14 +1803,15 @@ def get_resource_schedule(
     for alloc in allocations:
         appt = alloc.appointment
         service = db.get(Service, appt.service_id)
-        result.append({
-            "allocation_id": alloc.id,
-            "appointment_id": appt.id,
-            "start_time": alloc.start_time.isoformat(),
-            "end_time": alloc.end_time.isoformat(),
-            "client_name": appt.client_name,
-            "patient_name": appt.patient_name,
-            "service_name": service.name if service else "Unknown",
-        })
+        result.append(ScheduleEventOut(
+            allocation_id=alloc.id,
+            appointment_id=appt.id,
+            start_time=alloc.start_time,
+            end_time=alloc.end_time,
+            client_name=appt.client_name,
+            patient_name=appt.patient_name,
+            service_name=service.name if service else "Unknown",
+            status=appt.status,
+        ))
 
     return result

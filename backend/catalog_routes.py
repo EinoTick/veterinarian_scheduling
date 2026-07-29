@@ -2,7 +2,6 @@
 Catalog + lifecycle CRUD endpoints (resources, services, roles, clients, patients, users update).
 Mounted from main.py.
 """
-from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from auth import clinic_filter, get_current_user, hash_password, require_clinic_admin, revoke_all_refresh_tokens
 from database import get_db
+from errors import http_internal_error
 from models import Client, Patient, Resource, Role, Service, User
 from schemas import (
     ClientCreate, ClientOut, ClientUpdate,
@@ -19,6 +19,7 @@ from schemas import (
     ServiceCreate, ServiceOut, ServiceUpdate,
     UserOut, UserUpdate,
 )
+from timeutil import utc_now
 
 router = APIRouter()
 
@@ -41,7 +42,7 @@ def _resolve_clinic_id(
 
 
 def _stamp_create(obj, user: User):
-    now = datetime.utcnow()
+    now = utc_now()
     if hasattr(obj, "created_at") and getattr(obj, "created_at", None) is None:
         obj.created_at = now
     if hasattr(obj, "updated_at"):
@@ -52,7 +53,7 @@ def _stamp_create(obj, user: User):
 
 def _stamp_update(obj):
     if hasattr(obj, "updated_at"):
-        obj.updated_at = datetime.utcnow()
+        obj.updated_at = utc_now()
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ def update_user(
         db.refresh(user)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return user
 
 
@@ -164,7 +165,7 @@ def create_role(
         db.refresh(role)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return role
 
 
@@ -196,7 +197,7 @@ def update_role(
         db.refresh(role)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return role
 
 
@@ -238,7 +239,7 @@ def create_resource(
         db.refresh(resource)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return resource
 
 
@@ -268,7 +269,7 @@ def update_resource(
         db.refresh(resource)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return resource
 
 
@@ -331,7 +332,7 @@ def create_service(
         db.refresh(service)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return service
 
 
@@ -357,7 +358,7 @@ def update_service(
         db.refresh(service)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return service
 
 
@@ -426,7 +427,7 @@ def create_client(
         db.refresh(client)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return client
 
 
@@ -460,7 +461,7 @@ def update_client(
         db.refresh(client)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return client
 
 
@@ -492,7 +493,7 @@ def create_patient(
         db.refresh(patient)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return patient
 
 
@@ -524,7 +525,7 @@ def update_patient(
         db.refresh(patient)
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, detail=str(exc))
+        raise http_internal_error(exc, action="catalog_write")
     return patient
 
 

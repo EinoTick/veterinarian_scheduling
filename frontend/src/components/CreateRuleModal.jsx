@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
 
 const NONE = "__none__";
 
@@ -86,58 +87,47 @@ function ruleToForm(rule) {
 
 export default function CreateRuleModal({ open, onClose, onSaved, rule = null }) {
   const { apiFetch, user } = useAuth();
+  const {
+    services: allServices,
+    roles: allRoles,
+    resources: allResources,
+    clinics,
+    ensure,
+    invalidate,
+    forClinic,
+  } = useCatalog();
   const isEdit = !!rule;
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
 
-  const [services, setServices] = useState([]);
-  const [roles, setRoles] = useState([]);
-  const [resources, setResources] = useState([]);
-  const [clinics, setClinics] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    const safe = (r) => (r.ok ? r.json() : []);
-    const loads = [
-      apiFetch("/api/services").then(safe),
-      apiFetch("/api/roles").then(safe),
-      apiFetch("/api/resources").then(safe),
-    ];
-    if (isSystemAdmin) loads.push(apiFetch("/api/clinics").then(safe));
-
-    Promise.all(loads).then(([s, ro, res, cl]) => {
-      setRoles(ro);
-      if (cl) setClinics(cl);
-      const clinicId = rule?.clinic_id
-        ?? (form.clinic_id ? Number(form.clinic_id) : null)
-        ?? user?.clinic_id;
-      if (isSystemAdmin && clinicId) {
-        setServices(s.filter((x) => x.clinic_id === clinicId));
-        setResources(res.filter((x) => x.clinic_id === clinicId));
-      } else {
-        setServices(s);
-        setResources(res);
-      }
-    }).catch(() => {});
+    const keys = ["services", "roles", "resources"];
+    if (isSystemAdmin) keys.push("clinics");
+    ensure(keys).catch(() => {});
     setForm(rule ? ruleToForm(rule) : EMPTY_FORM);
     setError(null);
-  }, [open, rule, apiFetch]);
+  }, [open, rule, ensure, isSystemAdmin]);
 
-  // Re-filter services/resources when system admin changes clinic
-  useEffect(() => {
-    if (!open || !isSystemAdmin || !form.clinic_id) return;
-    const safe = (r) => (r.ok ? r.json() : []);
-    const cid = Number(form.clinic_id);
-    Promise.all([
-      apiFetch("/api/services").then(safe),
-      apiFetch("/api/resources").then(safe),
-    ]).then(([s, res]) => {
-      setServices(s.filter((x) => x.clinic_id === cid));
-      setResources(res.filter((x) => x.clinic_id === cid));
-    }).catch(() => {});
-  }, [open, isSystemAdmin, form.clinic_id, apiFetch]);
+  const clinicId = isSystemAdmin
+    ? (form.clinic_id || (rule?.clinic_id != null ? String(rule.clinic_id) : ""))
+    : null;
+  const services = useMemo(
+    () => (isSystemAdmin ? forClinic(allServices, clinicId) : allServices),
+    [allServices, clinicId, forClinic, isSystemAdmin]
+  );
+  const resources = useMemo(
+    () => (isSystemAdmin ? forClinic(allResources, clinicId) : allResources),
+    [allResources, clinicId, forClinic, isSystemAdmin]
+  );
+  const roles = useMemo(() => {
+    if (!isSystemAdmin || !clinicId) return allRoles;
+    const cid = Number(clinicId);
+    return allRoles.filter((r) => r.clinic_id == null || r.clinic_id === cid);
+  }, [allRoles, clinicId, isSystemAdmin]);
 
   function handleClose() {
     setForm(EMPTY_FORM);
@@ -255,6 +245,7 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
       return;
     }
 
+    invalidate(["rules"]);
     handleClose();
     onSaved?.();
   }

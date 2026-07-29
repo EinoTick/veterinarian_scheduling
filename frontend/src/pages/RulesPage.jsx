@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -12,9 +13,7 @@ const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export default function RulesPage() {
   const { apiFetch } = useAuth();
-  const [services, setServices] = useState([]);
-  const [roles, setRoles] = useState([]);
-  const [resources, setResources] = useState([]);
+  const { services, roles, resources, ensure, invalidate } = useCatalog();
   const [rules, setRules] = useState([]);
   const [loadError, setLoadError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -22,36 +21,28 @@ export default function RulesPage() {
   const [includeInactive, setIncludeInactive] = useState(false);
 
   const loadData = useCallback(async () => {
-    let rulesRes, servicesRes, rolesRes, resourcesRes;
     try {
-      [rulesRes, servicesRes, rolesRes, resourcesRes] = await Promise.all([
-        apiFetch(`/api/rules?include_inactive=${includeInactive}`),
-        apiFetch("/api/services"),
-        apiFetch("/api/roles"),
-        apiFetch("/api/resources"),
-      ]);
+      await ensure(["services", "roles", "resources"]);
+      const rulesRes = await apiFetch(`/api/rules?include_inactive=${includeInactive}`);
+      if (!rulesRes.ok) {
+        setLoadError("Failed to load rules.");
+        return;
+      }
+      setLoadError(null);
+      setRules(await rulesRes.json());
     } catch {
       setLoadError("Failed to load rules.");
-      return;
     }
-
-    if (!rulesRes.ok) {
-      setLoadError("Failed to load rules.");
-      return;
-    }
-
-    setLoadError(null);
-    setRules(await rulesRes.json());
-    setServices(servicesRes.ok ? await servicesRes.json() : []);
-    setRoles(rolesRes.ok ? await rolesRes.json() : []);
-    setResources(resourcesRes.ok ? await resourcesRes.json() : []);
-  }, [apiFetch, includeInactive]);
+  }, [apiFetch, ensure, includeInactive]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
   async function deactivateRule(rule) {
     const res = await apiFetch(`/api/rules/${rule.id}`, { method: "DELETE" });
-    if (res.ok || res.status === 204) loadData();
+    if (res.ok || res.status === 204) {
+      invalidate(["rules"]);
+      loadData();
+    }
   }
 
   async function reactivateRule(rule) {
@@ -59,7 +50,10 @@ export default function RulesPage() {
       method: "PATCH",
       body: JSON.stringify({ is_active: true }),
     });
-    if (res.ok) loadData();
+    if (res.ok) {
+      invalidate(["rules"]);
+      loadData();
+    }
   }
 
   const serviceName = (id) => services.find((s) => s.id === id)?.name ?? id;

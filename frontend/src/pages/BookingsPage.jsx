@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import BookingModal from "@/components/BookingModal";
 import { Plus } from "lucide-react";
+import { readErrorMessage } from "@/lib/http";
 
 function formatDateTime(iso) {
   return new Date(iso).toLocaleString(undefined, {
@@ -15,49 +18,105 @@ function formatDateTime(iso) {
   });
 }
 
+function toDateInputValue(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Local calendar day 00:00 → UTC ISO (date inputs are local, not Zulu). */
+function localDayStartIso(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d, 0, 0, 0, 0).toISOString();
+}
+
+/** Local calendar day after dateStr 00:00 → UTC ISO (exclusive end). */
+function localDayEndExclusiveIso(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d + 1, 0, 0, 0, 0).toISOString();
+}
+
+function defaultRange() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - 120);
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  end.setDate(end.getDate() + 60);
+  return { start: toDateInputValue(start), end: toDateInputValue(end) };
+}
+
 const STATUS_VARIANT = {
   scheduled: "secondary",
-  completed: "default",
+  completed: "success",
   cancelled: "outline",
   no_show: "destructive",
 };
 
+const PAGE_SIZE = 50;
+
 export default function BookingsPage() {
   const { apiFetch } = useAuth();
+  const { services, ensure } = useCatalog();
+  const initial = useMemo(() => defaultRange(), []);
   const [appointments, setAppointments] = useState([]);
-  const [services, setServices] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [loadError, setLoadError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [showCancelled, setShowCancelled] = useState(false);
   const [busyId, setBusyId] = useState(null);
+  const [rangeStart, setRangeStart] = useState(initial.start);
+  const [rangeEnd, setRangeEnd] = useState(initial.end);
 
   const loadData = useCallback(async () => {
-    let apptsRes, servicesRes;
+    if (rangeStart > rangeEnd) {
+      setLoadError("Start date must be on or before end date.");
+      return;
+    }
+    const startIso = localDayStartIso(rangeStart);
+    const endIso = localDayEndExclusiveIso(rangeEnd);
+
+    const qs = new URLSearchParams({
+      include_cancelled: String(showCancelled),
+      start: startIso,
+      end: endIso,
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+    });
+
     try {
-      [apptsRes, servicesRes] = await Promise.all([
-        apiFetch(`/api/appointments?include_cancelled=${showCancelled}`),
-        apiFetch("/api/services"),
-      ]);
+      await ensure(["services"]);
+      const apptsRes = await apiFetch(`/api/appointments?${qs}`);
+      if (!apptsRes.ok) {
+        setLoadError(await readErrorMessage(apptsRes, "Failed to load appointments."));
+        return;
+      }
+
+      setLoadError(null);
+      const body = await apptsRes.json();
+      if (Array.isArray(body)) {
+        setAppointments(body);
+        setTotal(body.length);
+      } else {
+        setAppointments(body.items ?? []);
+        setTotal(body.total ?? 0);
+      }
     } catch {
       setLoadError("Failed to load appointments.");
-      return;
     }
-
-    if (!apptsRes.ok) {
-      setLoadError("Failed to load appointments.");
-      return;
-    }
-
-    setLoadError(null);
-    setAppointments(await apptsRes.json());
-    setServices(servicesRes.ok ? await servicesRes.json() : []);
-  }, [apiFetch, showCancelled]);
+  }, [apiFetch, ensure, showCancelled, rangeStart, rangeEnd, offset]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
   const serviceName = (id) => services.find((s) => s.id === id)?.name ?? `Service #${id}`;
 
   async function setStatus(appt, status) {
+    if (status === "cancelled") {
+      const ok = window.confirm("Cancel this appointment?");
+      if (!ok) return;
+    }
     setBusyId(appt.id);
     setLoadError(null);
     try {
@@ -78,6 +137,11 @@ export default function BookingsPage() {
     }
   }
 
+  const pageStart = total === 0 ? 0 : offset + 1;
+  const pageEnd = Math.min(offset + PAGE_SIZE, total);
+  const canPrev = offset > 0;
+  const canNext = offset + PAGE_SIZE < total;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -85,9 +149,29 @@ export default function BookingsPage() {
           <h2 className="text-2xl font-semibold tracking-tight">Bookings</h2>
           <p className="text-sm text-muted-foreground">View and manage appointments</p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
           <div className="flex items-center gap-2">
-            <Switch id="show-cancelled" checked={showCancelled} onCheckedChange={setShowCancelled} />
+            <Label htmlFor="range-start" className="text-sm text-muted-foreground">From</Label>
+            <Input
+              id="range-start"
+              type="date"
+              value={rangeStart}
+              onChange={(e) => { setOffset(0); setRangeStart(e.target.value); }}
+              className="w-auto"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="range-end" className="text-sm text-muted-foreground">To</Label>
+            <Input
+              id="range-end"
+              type="date"
+              value={rangeEnd}
+              onChange={(e) => { setOffset(0); setRangeEnd(e.target.value); }}
+              className="w-auto"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch id="show-cancelled" checked={showCancelled} onCheckedChange={(v) => { setOffset(0); setShowCancelled(v); }} />
             <Label htmlFor="show-cancelled" className="text-sm text-muted-foreground">Show cancelled</Label>
           </div>
           <Button onClick={() => setModalOpen(true)}>
@@ -98,14 +182,17 @@ export default function BookingsPage() {
       </div>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle>Appointments</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            {total === 0 ? "0 results" : `${pageStart}–${pageEnd} of ${total}`}
+          </p>
         </CardHeader>
         <CardContent>
           {loadError ? (
             <p className="text-sm text-destructive">{loadError}</p>
           ) : appointments.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No appointments yet.</p>
+            <p className="text-sm text-muted-foreground">No appointments in this date range.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -166,6 +253,27 @@ export default function BookingsPage() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {(canPrev || canNext) && (
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!canPrev}
+                onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+              >
+                Previous
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!canNext}
+                onClick={() => setOffset((o) => o + PAGE_SIZE)}
+              >
+                Next
+              </Button>
             </div>
           )}
         </CardContent>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,9 +17,9 @@ import { Plus } from "lucide-react";
 
 export default function ServicesPage() {
   const { apiFetch, user } = useAuth();
+  const { clinics, ensure, invalidate } = useCatalog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
   const [items, setItems] = useState([]);
-  const [clinics, setClinics] = useState([]);
   const [includeInactive, setIncludeInactive] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", default_duration_minutes: "30", clinic_id: "" });
@@ -27,11 +28,8 @@ export default function ServicesPage() {
   const load = useCallback(async () => {
     const res = await apiFetch(`/api/services?include_inactive=${includeInactive}`);
     if (res.ok) setItems(await res.json());
-    if (isSystemAdmin) {
-      const cl = await apiFetch("/api/clinics");
-      if (cl.ok) setClinics(await cl.json());
-    }
-  }, [apiFetch, includeInactive, isSystemAdmin]);
+    if (isSystemAdmin) await ensure(["clinics"]);
+  }, [apiFetch, ensure, includeInactive, isSystemAdmin]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -51,6 +49,7 @@ export default function ServicesPage() {
     }
     setOpen(false);
     setForm({ name: "", default_duration_minutes: "30", clinic_id: "" });
+    invalidate(["services"]);
     load();
   }
 
@@ -59,6 +58,7 @@ export default function ServicesPage() {
       method: "PATCH",
       body: JSON.stringify({ is_active: !s.is_active }),
     });
+    invalidate(["services"]);
     load();
   }
 

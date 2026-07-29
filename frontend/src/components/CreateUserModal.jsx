@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
 import { validatePassword, PASSWORD_HINT } from "@/lib/password";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,32 +12,28 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 
+const NONE = "__none__";
+
 export default function CreateUserModal({ open, onClose, onCreated }) {
   const { apiFetch, user: currentUser } = useAuth();
+  const { roles: clinicalRoles, clinics, ensure, invalidate } = useCatalog();
   const isSysAdmin = currentUser?.system_role === "SYSTEM_ADMIN";
 
-  const [clinicalRoles, setClinicalRoles] = useState([]);
-  const [clinics, setClinics] = useState([]);
   const [form, setForm] = useState({
-    name: "", email: "", password: "", system_role: "USER", role_id: "", clinic_id: "",
+    name: "", email: "", password: "", system_role: "USER", role_id: NONE, clinic_id: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     if (!open) return;
-    const safe = (r) => (r.ok ? r.json() : []);
-    Promise.all([
-      apiFetch("/api/roles").then(safe),
-      isSysAdmin ? apiFetch("/api/clinics").then(safe) : Promise.resolve([]),
-    ]).then(([roles, clinicList]) => {
-      setClinicalRoles(roles);
-      setClinics(clinicList);
-    }).catch(() => {});
-  }, [open, apiFetch, isSysAdmin]);
+    const keys = ["roles"];
+    if (isSysAdmin) keys.push("clinics");
+    ensure(keys).catch(() => {});
+  }, [open, ensure, isSysAdmin]);
 
   function resetForm() {
-    setForm({ name: "", email: "", password: "", system_role: "USER", role_id: "", clinic_id: "" });
+    setForm({ name: "", email: "", password: "", system_role: "USER", role_id: NONE, clinic_id: "" });
     setError(null);
   }
 
@@ -69,7 +66,7 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
       email: form.email,
       password: form.password,
       system_role: form.system_role,
-      role_id: form.role_id ? Number(form.role_id) : null,
+      role_id: form.role_id && form.role_id !== NONE ? Number(form.role_id) : null,
       clinic_id: form.clinic_id ? Number(form.clinic_id) : null,
     };
 
@@ -94,6 +91,7 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
     }
 
     resetForm();
+    invalidate(["staff"]);
     onCreated?.();
     onClose();
   }
@@ -150,7 +148,7 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
               >
                 <SelectTrigger><SelectValue placeholder="Select role…" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">None</SelectItem>
+                  <SelectItem value={NONE}>None</SelectItem>
                   {clinicalRoles.map((r) => (
                     <SelectItem key={r.id} value={String(r.id)}>{r.name}</SelectItem>
                   ))}
