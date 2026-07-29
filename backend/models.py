@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint,
+    JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -61,7 +61,10 @@ class Resource(Base):
     id = Column(Integer, primary_key=True, index=True)
     clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False)
     name = Column(String, nullable=False)
+    # Broad kind: room | equipment
     resource_type = Column(String, nullable=False)
+    # Narrower group for "any exam room" style rules: exam_room | dental_suite | …
+    category = Column(String, nullable=True)
 
     clinic = relationship("Clinic", back_populates="resources")
     allocations = relationship("AppointmentAllocation", back_populates="resource")
@@ -91,12 +94,25 @@ class Rule(Base):
     clinic_id = Column(Integer, ForeignKey("clinics.id"), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
     required_role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
+    # Additional roles that also satisfy the role constraint (OR with required_role_id)
+    alternative_role_ids = Column(JSON, nullable=True)  # e.g. [2, 3]
     required_resource_id = Column(Integer, ForeignKey("resources.id"), nullable=True)
+    # Match any resource of this broad type ("room") or narrow category ("exam_room")
+    required_resource_type = Column(String, nullable=True)
+    required_resource_category = Column(String, nullable=True)
+    # How many matching allocations are required (e.g. 2 techs)
+    min_quantity = Column(Integer, nullable=False, default=1)
     is_hard_stop = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True, nullable=False)
     description = Column(String, nullable=False)
+    # Timing window the matching allocation must cover within the appointment
     duration_minutes = Column(Integer, nullable=True)
     start_offset_minutes = Column(Integer, nullable=False, default=0)
     presence_type = Column(String, nullable=True)  # IN_ROOM | IN_BUILDING | REMOTE
+    # Day/time scope — rule only applies when appointment starts in this window
+    active_weekdays = Column(JSON, nullable=True)  # [0..6] Mon=0; null = every day
+    active_start_time = Column(String, nullable=True)  # "HH:MM"; null = no lower bound
+    active_end_time = Column(String, nullable=True)  # "HH:MM"; null = no upper bound
 
     clinic = relationship("Clinic", back_populates="rules")
     service = relationship("Service", back_populates="rules")

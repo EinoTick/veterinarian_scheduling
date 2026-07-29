@@ -44,6 +44,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const [doubleBookingConflicts, setDoubleBookingConflicts] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const [livePreview, setLivePreview] = useState(null);
 
   // On open: load clinics list (system admins only) once
   useEffect(() => {
@@ -63,7 +64,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
     if (isSystemAdmin && !form.clinic_id) return; // wait until clinic is chosen
 
     const safe = (r) => (r.ok ? r.json() : []);
-    const qs = isSystemAdmin ? `?clinic_id=${form.clinic_id}` : "";
     Promise.all([
       apiFetch(`/api/services`).then(safe),
       apiFetch(`/api/users`).then(safe),
@@ -92,6 +92,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
     setOverridingUserId("");
     setDoubleBookingConflicts(null);
     setError(null);
+    setLivePreview(null);
   }
 
   function handleClose() {
@@ -179,6 +180,50 @@ export default function BookingModal({ open, onClose, onBooked }) {
       override_double_booking: overrideDoubleBooking,
     };
   }
+
+  // Live preview via /api/appointments/validate (debounced)
+  useEffect(() => {
+    if (!open) return;
+    if (softViolations || doubleBookingConflicts) return;
+    if (!form.service_id || !form.start_time || !form.client_name || !form.patient_name) {
+      setLivePreview(null);
+      return;
+    }
+    if (isSystemAdmin && !form.clinic_id) {
+      setLivePreview(null);
+      return;
+    }
+
+    const handle = setTimeout(async () => {
+      try {
+        const res = await apiFetch("/api/appointments/validate", {
+          method: "POST",
+          body: JSON.stringify(buildPayload()),
+        });
+        if (!res.ok) {
+          setLivePreview(null);
+          return;
+        }
+        setLivePreview(await res.json());
+      } catch {
+        setLivePreview(null);
+      }
+    }, 400);
+
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    open,
+    form.clinic_id,
+    form.service_id,
+    form.start_time,
+    form.client_name,
+    form.patient_name,
+    form.staff_allocations,
+    form.resource_allocations,
+    softViolations,
+    doubleBookingConflicts,
+  ]);
 
   async function submitBooking({ overrideDoubleBooking = false } = {}) {
     setSubmitting(true);
@@ -533,6 +578,39 @@ export default function BookingModal({ open, onClose, onBooked }) {
               </>
             )}
           </div>
+
+          {/* Live rule preview */}
+          {livePreview && !formLocked && !error && (
+            <div className="space-y-2">
+              {livePreview.hard_violations?.length > 0 && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 space-y-1">
+                  <p className="text-xs font-medium text-destructive">Would be blocked</p>
+                  {livePreview.hard_violations.map((v) => (
+                    <p key={v.rule_id} className="text-xs text-destructive">{v.description}</p>
+                  ))}
+                </div>
+              )}
+              {livePreview.soft_violations?.length > 0 && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 space-y-1">
+                  <p className="text-xs font-medium text-amber-700">Would need override</p>
+                  {livePreview.soft_violations.map((v) => (
+                    <p key={v.rule_id} className="text-xs text-amber-800">{v.description}</p>
+                  ))}
+                </div>
+              )}
+              {livePreview.double_booking_conflicts?.length > 0 && (
+                <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 space-y-1">
+                  <p className="text-xs font-medium text-red-700">Double-booking risk</p>
+                  {livePreview.double_booking_conflicts.map((c, i) => (
+                    <p key={i} className="text-xs text-red-700">{c.entity} is already booked</p>
+                  ))}
+                </div>
+              )}
+              {livePreview.valid && (
+                <p className="text-xs text-green-700">Looks good — no rule violations detected.</p>
+              )}
+            </div>
+          )}
 
           {/* Hard stop */}
           {error?.type === "hard_stop" && (
