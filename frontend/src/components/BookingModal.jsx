@@ -45,26 +45,46 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
+  // On open: load clinics list (system admins only) once
+  useEffect(() => {
+    if (!open || !isSystemAdmin) return;
+    apiFetch("/api/clinics")
+      .then((r) => (r.ok ? r.json() : []))
+      .then(setClinics)
+      .catch(() => {});
+  }, [open]);
+
+  // Reload clinic-scoped data whenever the modal opens or the selected clinic changes.
+  // For non-system-admins the backend already scopes by the caller's clinic, so we
+  // only re-fetch on open.  For system admins we also re-fetch when form.clinic_id
+  // changes so the dropdowns only show that clinic's staff/rooms/services.
   useEffect(() => {
     if (!open) return;
+    if (isSystemAdmin && !form.clinic_id) return; // wait until clinic is chosen
+
     const safe = (r) => (r.ok ? r.json() : []);
-    const fetches = [
-      apiFetch("/api/services").then(safe),
-      apiFetch("/api/users").then(safe),
-      apiFetch("/api/resources").then(safe),
-      apiFetch("/api/rules").then(safe),
-    ];
-    if (isSystemAdmin) fetches.push(apiFetch("/api/clinics").then(safe));
-    Promise.all(fetches)
-      .then(([s, u, res, r, cl]) => {
+    const qs = isSystemAdmin ? `?clinic_id=${form.clinic_id}` : "";
+    Promise.all([
+      apiFetch(`/api/services`).then(safe),
+      apiFetch(`/api/users`).then(safe),
+      apiFetch(`/api/resources`).then(safe),
+      apiFetch(`/api/rules`).then(safe),
+    ]).then(([s, u, res, r]) => {
+      if (isSystemAdmin) {
+        const cid = Number(form.clinic_id);
+        setServices(s.filter((x) => x.clinic_id === cid));
+        setResources(res.filter((x) => x.clinic_id === cid));
+        // Users list from /api/users is already admin-scoped; filter by clinic_id field
+        setUsers(u.filter((x) => x.clinic_id === cid));
+        setRules(r.filter((x) => x.clinic_id === cid));
+      } else {
         setServices(s);
         setUsers(u);
         setResources(res);
         setRules(r);
-        if (cl) setClinics(cl);
-      })
-      .catch(() => {});
-  }, [open]);
+      }
+    }).catch(() => {});
+  }, [open, isSystemAdmin ? form.clinic_id : null]);
 
   function resetState() {
     setForm(EMPTY_FORM);
@@ -225,7 +245,16 @@ export default function BookingModal({ open, onClose, onBooked }) {
               <Label>Clinic</Label>
               <Select
                 value={form.clinic_id}
-                onValueChange={(v) => setForm((f) => ({ ...f, clinic_id: v }))}
+                onValueChange={(v) =>
+                  setForm((f) => ({
+                    ...f,
+                    clinic_id: v,
+                    // Reset any selected staff/resources — they belong to the old clinic
+                    service_id: "",
+                    staff_allocations: [],
+                    resource_allocations: [],
+                  }))
+                }
                 disabled={formLocked}
               >
                 <SelectTrigger><SelectValue placeholder="Select clinic…" /></SelectTrigger>

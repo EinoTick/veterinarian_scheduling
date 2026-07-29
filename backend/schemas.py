@@ -89,6 +89,8 @@ class RuleCreate(BaseModel):
     duration_minutes: Optional[int] = None
     start_offset_minutes: int = 0
     presence_type: Optional[str] = None
+    # Only honoured when the caller is a SYSTEM_ADMIN
+    clinic_id: Optional[int] = None
 
     @model_validator(mode="after")
     def at_least_one_constraint(self):

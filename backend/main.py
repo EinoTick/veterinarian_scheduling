@@ -303,18 +303,36 @@ def create_rule(
     current_user: User = Depends(require_clinic_admin),
     db: Session = Depends(get_db),
 ):
-    if not db.get(Service, payload.service_id):
+    # Resolve the target clinic
+    if current_user.system_role == "SYSTEM_ADMIN":
+        if not payload.clinic_id:
+            raise HTTPException(400, "System administrators must supply a clinic_id.")
+        target_clinic_id = payload.clinic_id
+    else:
+        target_clinic_id = current_user.clinic_id
+
+    # Validate service belongs to target clinic
+    service = db.get(Service, payload.service_id)
+    if not service:
         raise HTTPException(404, "Service not found.")
+    if service.clinic_id != target_clinic_id:
+        raise HTTPException(400, "Service does not belong to the target clinic.")
+
+    # Validate optional role (roles are global, no tenant check needed)
     if payload.required_role_id and not db.get(Role, payload.required_role_id):
         raise HTTPException(404, "Role not found.")
-    if payload.required_resource_id and not db.get(Resource, payload.required_resource_id):
-        raise HTTPException(404, "Resource not found.")
 
-    if current_user.clinic_id is None:
-        raise HTTPException(400, "System administrators must be associated with a clinic to create rules.")
+    # Validate optional resource belongs to target clinic
+    if payload.required_resource_id:
+        resource = db.get(Resource, payload.required_resource_id)
+        if not resource:
+            raise HTTPException(404, "Resource not found.")
+        if resource.clinic_id != target_clinic_id:
+            raise HTTPException(400, "Resource does not belong to the target clinic.")
 
     try:
-        rule = Rule(**payload.model_dump(), clinic_id=current_user.clinic_id)
+        rule_data = payload.model_dump(exclude={"clinic_id"})
+        rule = Rule(**rule_data, clinic_id=target_clinic_id)
         db.add(rule)
         db.commit()
         db.refresh(rule)
@@ -343,12 +361,16 @@ def _evaluate_rules(service_id, allocations, db):
 
     violations = []
     for rule in rules:
-        satisfied = False
-        if rule.required_role_id is not None:
-            satisfied = rule.required_role_id in allocated_role_ids
-        elif rule.required_resource_id is not None:
-            satisfied = rule.required_resource_id in allocated_resource_ids
-        if not satisfied:
+        # A rule may constrain a role, a resource, or both — all constraints must be satisfied.
+        role_ok = (
+            rule.required_role_id is None
+            or rule.required_role_id in allocated_role_ids
+        )
+        resource_ok = (
+            rule.required_resource_id is None
+            or rule.required_resource_id in allocated_resource_ids
+        )
+        if not (role_ok and resource_ok):
             violations.append(ViolationDetail(
                 rule_id=rule.id,
                 description=rule.description,
@@ -413,6 +435,7 @@ def create_appointment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # ── Resolve clinic ────────────────────────────────────────────────────────
     if current_user.system_role == "SYSTEM_ADMIN":
         if not payload.clinic_id:
             raise HTTPException(400, "System administrators must provide a clinic_id.")
@@ -422,15 +445,55 @@ def create_appointment(
         if clinic_id is None:
             raise HTTPException(400, "User is not associated with a clinic.")
 
+    # ── Validate service belongs to this clinic (#3) ──────────────────────────
     service = db.get(Service, payload.service_id)
     if not service:
         raise HTTPException(404, "Service not found.")
+    if service.clinic_id != clinic_id:
+        raise HTTPException(400, "Service does not belong to the target clinic.")
+
+    service_duration = service.default_duration_minutes
+
+    # ── Validate allocations: tenant membership + offset/duration bounds (#3, #7)
+    for alloc_data in payload.allocations:
+        offset = alloc_data.start_offset_minutes or 0
+        duration = alloc_data.duration_minutes or service_duration
+
+        if offset < 0:
+            raise HTTPException(400, "Allocation start_offset_minutes must be >= 0.")
+        if duration <= 0:
+            raise HTTPException(400, "Allocation duration_minutes must be > 0.")
+        if offset + duration > service_duration:
+            raise HTTPException(
+                400,
+                f"Allocation window (offset {offset} + duration {duration} min) "
+                f"exceeds the service duration ({service_duration} min).",
+            )
+
+        if alloc_data.user_id:
+            alloc_user = db.get(User, alloc_data.user_id)
+            if not alloc_user:
+                raise HTTPException(404, f"User #{alloc_data.user_id} not found.")
+            if alloc_user.clinic_id != clinic_id:
+                raise HTTPException(
+                    400, f"User '{alloc_user.name}' does not belong to the target clinic."
+                )
+
+        if alloc_data.resource_id:
+            alloc_resource = db.get(Resource, alloc_data.resource_id)
+            if not alloc_resource:
+                raise HTTPException(404, f"Resource #{alloc_data.resource_id} not found.")
+            if alloc_resource.clinic_id != clinic_id:
+                raise HTTPException(
+                    400, f"Resource '{alloc_resource.name}' does not belong to the target clinic."
+                )
 
     transient_allocations = [
         AppointmentAllocation(user_id=a.user_id, resource_id=a.resource_id)
         for a in payload.allocations
     ]
 
+    # ── Rule validation ───────────────────────────────────────────────────────
     violations = _evaluate_rules(payload.service_id, transient_allocations, db)
     hard_violations = [v for v in violations if v.is_hard_stop]
     soft_violations = [v for v in violations if not v.is_hard_stop]
@@ -447,11 +510,38 @@ def create_appointment(
             "violations": [v.model_dump() for v in soft_violations],
         })
 
+    # Enforce audit trail for soft-stop overrides (#6)
+    if payload.override and soft_violations and not payload.overriding_user_id:
+        raise HTTPException(
+            400, "An authorizing staff member (overriding_user_id) is required to override a soft stop."
+        )
+
+    # ── Double-booking check with row-level lock (#8) ─────────────────────────
     if not payload.override_double_booking:
+        # Lock existing allocation rows that could overlap before we check,
+        # preventing a concurrent request from slipping through at the same time.
+        appt_start = payload.start_time
+        appt_end = appt_start + timedelta(minutes=service_duration)
+        for alloc_data in payload.allocations:
+            if alloc_data.user_id:
+                db.query(AppointmentAllocation).filter(
+                    AppointmentAllocation.user_id == alloc_data.user_id,
+                    AppointmentAllocation.start_time.isnot(None),
+                    AppointmentAllocation.start_time < appt_end,
+                    AppointmentAllocation.end_time > appt_start,
+                ).with_for_update().all()
+            if alloc_data.resource_id:
+                db.query(AppointmentAllocation).filter(
+                    AppointmentAllocation.resource_id == alloc_data.resource_id,
+                    AppointmentAllocation.start_time.isnot(None),
+                    AppointmentAllocation.start_time < appt_end,
+                    AppointmentAllocation.end_time > appt_start,
+                ).with_for_update().all()
+
         conflicts = _check_double_booking(
             payload.allocations,
             payload.start_time,
-            service.default_duration_minutes,
+            service_duration,
             db,
         )
         if conflicts:
@@ -460,7 +550,7 @@ def create_appointment(
                 "conflicts": conflicts,
             })
 
-    end_time = payload.start_time + timedelta(minutes=service.default_duration_minutes)
+    end_time = payload.start_time + timedelta(minutes=service_duration)
     appt = Appointment(
         clinic_id=clinic_id,
         service_id=payload.service_id,
@@ -477,7 +567,7 @@ def create_appointment(
 
         for alloc_data, alloc in zip(payload.allocations, transient_allocations):
             offset = alloc_data.start_offset_minutes or 0
-            duration = alloc_data.duration_minutes or service.default_duration_minutes
+            duration = alloc_data.duration_minutes or service_duration
             alloc.appointment_id = appt.id
             alloc.start_time = payload.start_time + timedelta(minutes=offset)
             alloc.end_time = alloc.start_time + timedelta(minutes=duration)
@@ -510,8 +600,18 @@ def get_user_schedule(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if current_user.system_role == "USER" and current_user.id != user_id:
-        raise HTTPException(403, "Access denied.")
+    target_user = db.get(User, user_id)
+    if not target_user:
+        raise HTTPException(404, "User not found.")
+
+    if current_user.system_role == "USER":
+        # Regular users may only view their own schedule
+        if current_user.id != user_id:
+            raise HTTPException(403, "Access denied.")
+    elif current_user.system_role == "CLINIC_ADMIN":
+        # Clinic admins may only view schedules within their own clinic
+        if target_user.clinic_id != current_user.clinic_id:
+            raise HTTPException(403, "Access denied.")
 
     # Normalize to naive datetimes since the DB stores without TZ
     start_naive = start.replace(tzinfo=None)
