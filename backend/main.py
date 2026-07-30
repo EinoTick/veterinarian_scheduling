@@ -1,6 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import os
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from auth import (
+    IS_PRODUCTION,
     REFRESH_COOKIE,
     clear_auth_cookies,
     clinic_filter,
@@ -36,7 +38,7 @@ from models import (
     Patient, Resource, Role, Rule, Service, User,
 )
 from schemas import (
-    AppointmentCreate, AppointmentListOut, AppointmentOut, AppointmentUpdate,
+    APPOINTMENT_STATUSES, AppointmentCreate, AppointmentListOut, AppointmentOut, AppointmentUpdate,
     AppointmentValidateOut, AuthSessionOut, ClinicOut, PasswordChange, ResourceOut,
     RoleOut, RuleCreate, RuleOut, RuleUpdate, ScheduleEventOut, ServiceOut, SoftStopResponse,
     UserCreate, UserOut, ViolationDetail,
@@ -44,9 +46,14 @@ from schemas import (
 from catalog_routes import router as catalog_router
 from errors import http_internal_error, log_event
 from logging_config import setup_logging
-from timeutil import to_utc_naive, utc_now
+from timeutil import as_utc_iso, to_utc_naive, utc_now
 
-app = FastAPI(title="VetClinic Scheduler")
+app = FastAPI(
+    title="VetClinic Scheduler",
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
+)
 
 _cors_origins = [
     o.strip()
@@ -66,14 +73,30 @@ app.add_middleware(
 
 app.include_router(catalog_router)
 
+
+@app.get("/health")
+def health(db: Session = Depends(get_db)):
+    """Liveness/readiness probe — no auth, cheap DB round-trip."""
+    db.execute(text("SELECT 1"))
+    return {"status": "ok"}
+
+
 Base.metadata.create_all(bind=engine)
 
 
 # ── Seed ──────────────────────────────────────────────────────────────────────
 
 def seed_db(db: Session):
+    if IS_PRODUCTION:
+        return
     if db.query(Clinic).count():
         return
+
+    log_event(
+        "demo_data_seeded",
+        level=30,
+        msg="No clinics found — seeding demo clinic, users, and rules (ENVIRONMENT != production).",
+    )
 
     # Demo clinic
     clinic = Clinic(name="Riverside Animal Hospital", timezone="UTC")
@@ -193,132 +216,38 @@ def seed_db(db: Session):
     db.commit()
 
 
-def run_migrations(db: Session):
-    """Idempotently add new columns / tables to existing databases."""
-    conn = db.connection()
-    stmts = [
-        # Prior rule/resource/allocation columns
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS duration_minutes INTEGER",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS start_offset_minutes INTEGER DEFAULT 0",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS presence_type VARCHAR",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS alternative_role_ids JSON",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS required_resource_type VARCHAR",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS required_resource_category VARCHAR",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS min_quantity INTEGER DEFAULT 1",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS active_weekdays JSON",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS active_start_time VARCHAR",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS active_end_time VARCHAR",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE rules ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
-        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS category VARCHAR",
-        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE resources ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
-        "ALTER TABLE services ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE services ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE services ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
-        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS start_time TIMESTAMP",
-        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS end_time TIMESTAMP",
-        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS presence_type VARCHAR",
-        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE appointment_allocations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS client_id INTEGER",
-        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS patient_id INTEGER",
-        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER",
-        "ALTER TABLE clinics ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE clinics ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS clinic_id INTEGER",
-        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
-        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
-        "ALTER TABLE override_logs ALTER COLUMN rule_id DROP NOT NULL",
-        "ALTER TABLE override_logs ADD COLUMN IF NOT EXISTS override_type VARCHAR DEFAULT 'soft_stop'",
-        "ALTER TABLE override_logs ADD COLUMN IF NOT EXISTS notes VARCHAR",
-        # Drop global unique on roles.name if present (name is now scoped)
-        "ALTER TABLE roles DROP CONSTRAINT IF EXISTS roles_name_key",
-        # Clients / patients tables created via metadata.create_all; ensure FKs exist
-        """
-        CREATE TABLE IF NOT EXISTS clients (
-            id SERIAL PRIMARY KEY,
-            clinic_id INTEGER NOT NULL REFERENCES clinics(id),
-            name VARCHAR NOT NULL,
-            email VARCHAR,
-            phone VARCHAR,
-            notes VARCHAR,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            created_by_user_id INTEGER
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS patients (
-            id SERIAL PRIMARY KEY,
-            clinic_id INTEGER NOT NULL REFERENCES clinics(id),
-            client_id INTEGER NOT NULL REFERENCES clients(id),
-            name VARCHAR NOT NULL,
-            species VARCHAR,
-            breed VARCHAR,
-            notes VARCHAR,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            created_by_user_id INTEGER
-        )
-        """,
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_global_name ON roles (name) WHERE clinic_id IS NULL",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_clinic_name ON roles (clinic_id, name) WHERE clinic_id IS NOT NULL",
-        "UPDATE resources SET category = 'dental_suite' WHERE name LIKE 'Dental Suite%' AND category IS NULL",
-        "UPDATE resources SET category = 'surgery_suite' WHERE name LIKE 'Surgery Suite%' AND category IS NULL",
-        "UPDATE resources SET category = 'exam_room' WHERE name LIKE 'Exam Room%' AND category IS NULL",
-        "UPDATE resources SET category = 'imaging' WHERE name LIKE 'X-Ray%' AND category IS NULL",
-        "UPDATE rules SET is_active = TRUE WHERE is_active IS NULL",
-        "UPDATE rules SET min_quantity = 1 WHERE min_quantity IS NULL",
-        "UPDATE resources SET is_active = TRUE WHERE is_active IS NULL",
-        "UPDATE services SET is_active = TRUE WHERE is_active IS NULL",
-        "UPDATE roles SET is_active = TRUE WHERE is_active IS NULL",
-        "UPDATE override_logs SET override_type = 'soft_stop' WHERE override_type IS NULL",
-        "UPDATE appointments SET status = 'scheduled' WHERE status IS NULL",
-    ]
-    for stmt in stmts:
-        try:
-            conn.execute(text(stmt))
-        except Exception as exc:
-            log_event(
-                "legacy_migration_stmt_failed",
-                level=30,
-                msg=f"Legacy run_migrations statement failed (continuing): {exc}",
-                detail=stmt[:120],
-            )
-    db.commit()
+# Arbitrary fixed key for the startup-migration advisory lock, scoped to
+# this app (any bigint works — it just needs to be consistent across every
+# instance so they contend for the same lock).
+_MIGRATION_LOCK_KEY = 927341001
 
 
 def run_alembic_migrations() -> None:
-    """Apply versioned Alembic migrations (preferred path for schema changes)."""
+    """
+    Apply versioned Alembic migrations — the only schema-change path.
+
+    Held under a Postgres advisory lock so that multiple app instances
+    starting concurrently (rolling deploy, multiple workers/replicas) don't
+    race the same DDL: the second instance blocks here until the first
+    finishes instead of both running `command.upgrade` at once.
+    """
     from pathlib import Path
     from alembic import command
     from alembic.config import Config
 
     cfg = Config(str(Path(__file__).resolve().parent / "alembic.ini"))
-    command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _MIGRATION_LOCK_KEY})
+        try:
+            command.upgrade(cfg, "head")
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _MIGRATION_LOCK_KEY})
 
 
 @app.on_event("startup")
 def on_startup():
     setup_logging()
     log_event("app_startup", msg="VetClinic API starting")
-    # Legacy idempotent column backfills (logged, not silent). New changes → Alembic.
-    with SessionLocal() as db:
-        run_migrations(db)
     try:
         run_alembic_migrations()
     except Exception as exc:
@@ -351,6 +280,15 @@ def _client_ip(request: Request) -> str:
     return "unknown"
 
 
+def _mask_email(email: str) -> str:
+    """Redact an email for logs: keep enough to correlate, not enough to read."""
+    if not email or "@" not in email:
+        return "***"
+    local, _, domain = email.partition("@")
+    visible = local[:1] or "*"
+    return f"{visible}***@{domain}"
+
+
 @app.post("/api/auth/token", response_model=AuthSessionOut)
 def login(
     request: Request,
@@ -366,8 +304,8 @@ def login(
     user = db.query(User).filter(User.email == email).first()
     if not user:
         run_dummy_password_check(form.password)
-        record_login_failure(email)
-        log_event("login_failed", level=30, email=email, ip=ip, detail="unknown_email")
+        record_login_failure(ip, email)
+        log_event("login_failed", level=30, email=_mask_email(email), ip=ip, detail="unknown_email")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
@@ -375,8 +313,8 @@ def login(
         )
 
     if not verify_password(form.password, user.hashed_password):
-        record_login_failure(email)
-        log_event("login_failed", level=30, email=email, ip=ip, user_id=user.id, detail="bad_password")
+        record_login_failure(ip, email)
+        log_event("login_failed", level=30, email=_mask_email(email), ip=ip, user_id=user.id, detail="bad_password")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
@@ -385,15 +323,15 @@ def login(
 
     if not user.is_active:
         # Valid credentials, disabled account — same client message, no lockout bump.
-        log_event("login_failed", level=30, email=email, ip=ip, user_id=user.id, detail="inactive")
+        log_event("login_failed", level=30, email=_mask_email(email), ip=ip, user_id=user.id, detail="inactive")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    record_login_success(email)
-    log_event("login_success", user_id=user.id, email=email, ip=ip, clinic_id=user.clinic_id)
+    record_login_success(ip, email)
+    log_event("login_success", user_id=user.id, email=_mask_email(email), ip=ip, clinic_id=user.clinic_id)
     issue_session(
         response,
         db,
@@ -588,10 +526,14 @@ def create_user(
 
 @app.get("/api/clinics", response_model=List[ClinicOut])
 def list_clinics(
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return db.query(Clinic).all()
+    # SYSTEM_ADMIN operates across clinics; everyone else only ever needs
+    # (and should only ever see) their own clinic's record.
+    if current_user.system_role == "SYSTEM_ADMIN":
+        return db.query(Clinic).all()
+    return db.query(Clinic).filter(Clinic.id == current_user.clinic_id).all()
 
 
 @app.get("/api/rules", response_model=List[RuleOut])
@@ -749,12 +691,19 @@ def _validate_rule_refs(payload: RuleCreate, target_clinic_id: int, db: Session)
     if service.clinic_id != target_clinic_id:
         raise HTTPException(400, "Service does not belong to the target clinic.")
 
-    if payload.required_role_id and not db.get(Role, payload.required_role_id):
-        raise HTTPException(404, "Role not found.")
+    if payload.required_role_id:
+        role = db.get(Role, payload.required_role_id)
+        if not role:
+            raise HTTPException(404, "Role not found.")
+        if role.clinic_id is not None and role.clinic_id != target_clinic_id:
+            raise HTTPException(400, "Role does not belong to the target clinic.")
     if payload.alternative_role_ids:
         for rid in payload.alternative_role_ids:
-            if not db.get(Role, rid):
+            alt_role = db.get(Role, rid)
+            if not alt_role:
                 raise HTTPException(404, f"Alternative role #{rid} not found.")
+            if alt_role.clinic_id is not None and alt_role.clinic_id != target_clinic_id:
+                raise HTTPException(400, f"Alternative role #{rid} does not belong to the target clinic.")
 
     if payload.required_resource_id and (
         payload.required_resource_type or payload.required_resource_category
@@ -780,6 +729,22 @@ def _validate_rule_refs(payload: RuleCreate, target_clinic_id: int, db: Session)
         raise HTTPException(400, "active_start_time must be HH:MM.")
     if payload.active_end_time and not _valid_hhmm(payload.active_end_time):
         raise HTTPException(400, "active_end_time must be HH:MM.")
+    if (
+        payload.active_start_time
+        and payload.active_end_time
+        and payload.active_start_time == payload.active_end_time
+    ):
+        # Ambiguous: could mean "all day" or "never". active_start_time <
+        # active_end_time is a same-day window; active_start_time > end is
+        # treated as an overnight window (see _rule_applies_at) — but equal
+        # values don't have a sensible interpretation, so reject explicitly
+        # instead of silently producing a dead or always-on rule.
+        raise HTTPException(
+            400,
+            "active_start_time and active_end_time cannot be equal. "
+            "Leave both blank for an all-day rule, or set a real range "
+            "(start > end is treated as an overnight window).",
+        )
 
 
 def _valid_hhmm(value: str) -> bool:
@@ -813,18 +778,49 @@ def _accepted_role_ids(rule: Rule) -> set:
     return roles
 
 
-def _rule_applies_at(rule: Rule, appt_start: datetime) -> bool:
-    """Return False when the appointment falls outside the rule's day/time window."""
+def _resolve_clinic_timezone(clinic_id: Optional[int], db: Session) -> ZoneInfo:
+    clinic = db.get(Clinic, clinic_id) if clinic_id is not None else None
+    tz_name = clinic.timezone if clinic and clinic.timezone else "UTC"
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        # Bad/unknown IANA name shouldn't take down rule evaluation — fall back to UTC.
+        return ZoneInfo("UTC")
+
+
+def _to_clinic_local(appt_start_utc: datetime, clinic_id: Optional[int], db: Session) -> datetime:
+    """Convert a UTC-naive appointment start into the clinic's local wall time (naive)."""
+    tz = _resolve_clinic_timezone(clinic_id, db)
+    aware_utc = appt_start_utc.replace(tzinfo=timezone.utc)
+    return aware_utc.astimezone(tz).replace(tzinfo=None)
+
+
+def _rule_applies_at(rule: Rule, appt_start_local: datetime) -> bool:
+    """
+    Return False when the appointment falls outside the rule's day/time window.
+
+    `appt_start_local` must already be converted to the clinic's local time
+    (see `_to_clinic_local`) — comparing against the rule's HH:MM/weekday
+    fields in UTC would fire day/time-scoped rules at the wrong wall-clock
+    hour for any clinic not physically in UTC.
+    """
     if rule.active_weekdays is not None and len(rule.active_weekdays) > 0:
-        if appt_start.weekday() not in rule.active_weekdays:
+        if appt_start_local.weekday() not in rule.active_weekdays:
             return False
 
-    appt_hm = appt_start.strftime("%H:%M")
-    if rule.active_start_time and appt_hm < rule.active_start_time:
-        return False
-    if rule.active_end_time and appt_hm >= rule.active_end_time:
-        return False
-    return True
+    start, end = rule.active_start_time, rule.active_end_time
+    if not start and not end:
+        return True
+
+    appt_hm = appt_start_local.strftime("%H:%M")
+    if start and end:
+        if start <= end:
+            return start <= appt_hm < end
+        # Overnight window (e.g. 22:00-02:00): wraps past midnight.
+        return appt_hm >= start or appt_hm < end
+    if start:
+        return appt_hm >= start
+    return appt_hm < end
 
 
 def _allocation_covers_rule_window(alloc, rule: Rule, service_duration: int) -> bool:
@@ -927,15 +923,21 @@ def _evaluate_rules(service_id, allocations, db, appt_start=None, service_durati
     if not rules:
         return []
 
-    if service_duration is None:
+    service = None
+    if service_duration is None or appt_start is not None:
         service = db.get(Service, service_id)
+    if service_duration is None:
         service_duration = service.default_duration_minutes if service else 30
+
+    appt_start_local = None
+    if appt_start is not None:
+        appt_start_local = _to_clinic_local(appt_start, service.clinic_id if service else None, db)
 
     norms = [_normalize_alloc_for_eval(a, service_duration) for a in allocations]
     violations = []
 
     for rule in rules:
-        if appt_start is not None and not _rule_applies_at(rule, appt_start):
+        if appt_start_local is not None and not _rule_applies_at(rule, appt_start_local):
             continue
 
         qty = rule.min_quantity or 1
@@ -981,6 +983,28 @@ def _evaluate_rules(service_id, allocations, db, appt_start=None, service_durati
     return violations
 
 
+def _lock_allocation_targets(allocations, db: Session) -> None:
+    """
+    Serialize concurrent bookings for the same user/resource.
+
+    The naive approach — lock whatever AppointmentAllocation rows currently
+    overlap the new window — locks nothing when the target slot is empty
+    (the common case), so two concurrent requests booking the same brand-new
+    slot for the same vet/room can both pass the double-booking check and
+    both commit. Locking the User/Resource master row instead works because
+    that row always exists, so `SELECT ... FOR UPDATE` genuinely serializes
+    the check-then-insert for that person/resource across concurrent
+    transactions. IDs are locked in a fixed (sorted) order across all callers
+    to avoid lock-ordering deadlocks between overlapping bookings.
+    """
+    user_ids = sorted({a.user_id for a in allocations if a.user_id})
+    resource_ids = sorted({a.resource_id for a in allocations if a.resource_id})
+    if user_ids:
+        db.query(User.id).filter(User.id.in_(user_ids)).order_by(User.id).with_for_update().all()
+    if resource_ids:
+        db.query(Resource.id).filter(Resource.id.in_(resource_ids)).order_by(Resource.id).with_for_update().all()
+
+
 def _check_double_booking(allocations_in, appt_start, service_duration, db, exclude_appointment_id=None):
     conflicts = []
     for alloc_data in allocations_in:
@@ -1009,6 +1033,9 @@ def _check_double_booking(allocations_in, appt_start, service_duration, db, excl
                 conflicts.append({
                     "entity": user.name if user else f"User #{alloc_data.user_id}",
                     "entity_type": "user",
+                    "appointment_id": overlap.appointment_id,
+                    "start_time": as_utc_iso(overlap.start_time),
+                    "end_time": as_utc_iso(overlap.end_time),
                 })
 
         if alloc_data.resource_id:
@@ -1018,6 +1045,9 @@ def _check_double_booking(allocations_in, appt_start, service_duration, db, excl
                 conflicts.append({
                     "entity": resource.name if resource else f"Resource #{alloc_data.resource_id}",
                     "entity_type": "resource",
+                    "appointment_id": overlap.appointment_id,
+                    "start_time": as_utc_iso(overlap.start_time),
+                    "end_time": as_utc_iso(overlap.end_time),
                 })
 
     return conflicts
@@ -1040,11 +1070,17 @@ def _validate_appointment_inputs(
     db: Session,
     *,
     exclude_appointment_id: Optional[int] = None,
+    enforce_future: bool = True,
 ):
     """
     Shared validation for create + preview. Returns
     (service, hard_violations, soft_violations, conflicts).
     Raises HTTPException for hard input errors (missing service, bad tenant, bad offsets).
+
+    `enforce_future` guards the past-date check. Callers pass False when
+    `payload.start_time` isn't actually being changed (e.g. editing an
+    existing appointment's notes without rescheduling it) so that touching
+    an appointment whose time has already passed doesn't become impossible.
     """
     service = db.get(Service, payload.service_id)
     if not service:
@@ -1054,7 +1090,19 @@ def _validate_appointment_inputs(
     if not service.is_active:
         raise HTTPException(400, "Service is inactive and cannot be booked.")
 
+    if not payload.allocations:
+        raise HTTPException(400, "At least one staff member or resource must be allocated.")
+
+    appt_start = to_utc_naive(payload.start_time)
+    if enforce_future and appt_start < utc_now() - timedelta(minutes=5):
+        raise HTTPException(400, "Appointment start_time cannot be in the past.")
+
     service_duration = service.default_duration_minutes
+
+    # (start_offset, end_offset, user_id, resource_id) per allocation, used
+    # below to reject a single payload double-booking itself (e.g. the same
+    # resource assigned twice with overlapping windows).
+    windows = []
 
     for alloc_data in payload.allocations:
         offset = alloc_data.start_offset_minutes or 0
@@ -1070,6 +1118,7 @@ def _validate_appointment_inputs(
                 f"Allocation window (offset {offset} + duration {duration} min) "
                 f"exceeds the service duration ({service_duration} min).",
             )
+        windows.append((offset, offset + duration, alloc_data.user_id, alloc_data.resource_id))
 
         if alloc_data.user_id:
             alloc_user = db.get(User, alloc_data.user_id)
@@ -1093,7 +1142,22 @@ def _validate_appointment_inputs(
                     400, f"Resource '{alloc_resource.name}' does not belong to the target clinic."
                 )
 
-    appt_start = to_utc_naive(payload.start_time)
+    for i in range(len(windows)):
+        i_start, i_end, i_user, i_resource = windows[i]
+        for j in range(i + 1, len(windows)):
+            j_start, j_end, j_user, j_resource = windows[j]
+            overlaps = i_start < j_end and j_start < i_end
+            if not overlaps:
+                continue
+            if i_user and i_user == j_user:
+                raise HTTPException(
+                    400, "This appointment assigns the same staff member twice with overlapping time windows."
+                )
+            if i_resource and i_resource == j_resource:
+                raise HTTPException(
+                    400, "This appointment assigns the same resource twice with overlapping time windows."
+                )
+
     violations = _evaluate_rules(
         payload.service_id,
         payload.allocations,
@@ -1139,8 +1203,18 @@ def _apply_status_transition(appt: Appointment, new_status: str):
     appt.status = new_status
 
 
-def _assert_override_authorizer(user_id: Optional[int], clinic_id: int, db: Session):
-    """Ensure overriding_user_id is an active staff member of the target clinic."""
+def _assert_override_authorizer(
+    user_id: Optional[int], clinic_id: int, db: Session, current_user: User
+):
+    """
+    Ensure overriding_user_id is a legitimate authorizer for this override.
+
+    The named authorizer must be the person actually making the request, or
+    the request must be made by a clinic/system admin acting on the clinic's
+    behalf. Without this, any authenticated staff member could attribute an
+    override to someone else (e.g. the lead vet) with no proof that person
+    approved it — defeating the point of the OverrideLog audit trail.
+    """
     if user_id is None:
         return
     authorizer = db.get(User, user_id)
@@ -1150,6 +1224,11 @@ def _assert_override_authorizer(user_id: Optional[int], clinic_id: int, db: Sess
         raise HTTPException(400, "System administrators cannot be used as override authorizers.")
     if authorizer.clinic_id != clinic_id:
         raise HTTPException(400, "Authorizing staff member does not belong to the target clinic.")
+    if user_id != current_user.id and current_user.system_role not in ("CLINIC_ADMIN", "SYSTEM_ADMIN"):
+        raise HTTPException(
+            400,
+            "You can only authorize an override as yourself, unless you are a clinic admin.",
+        )
 
 
 def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Session):
@@ -1255,6 +1334,9 @@ def list_appointments(
     end_bound = to_utc_naive(end) if end is not None else None
     if start_bound is not None and end_bound is not None and start_bound >= end_bound:
         raise HTTPException(400, "Query param 'start' must be earlier than 'end'.")
+
+    if status is not None and status not in APPOINTMENT_STATUSES:
+        raise HTTPException(400, f"status must be one of {APPOINTMENT_STATUSES}.")
 
     q = clinic_filter(db.query(Appointment), Appointment, current_user)
     if status:
@@ -1374,26 +1456,11 @@ def create_appointment(
         (payload.override and soft_violations)
         or (payload.override_double_booking and conflicts)
     ):
-        _assert_override_authorizer(payload.overriding_user_id, clinic_id, db)
+        _assert_override_authorizer(payload.overriding_user_id, clinic_id, db, current_user)
 
     start_time = to_utc_naive(payload.start_time)
-    # Always lock overlapping allocation rows, then re-check under the lock.
-    appt_end = start_time + timedelta(minutes=service_duration)
-    for alloc_data in payload.allocations:
-        if alloc_data.user_id:
-            db.query(AppointmentAllocation).filter(
-                AppointmentAllocation.user_id == alloc_data.user_id,
-                AppointmentAllocation.start_time.isnot(None),
-                AppointmentAllocation.start_time < appt_end,
-                AppointmentAllocation.end_time > start_time,
-            ).with_for_update().all()
-        if alloc_data.resource_id:
-            db.query(AppointmentAllocation).filter(
-                AppointmentAllocation.resource_id == alloc_data.resource_id,
-                AppointmentAllocation.start_time.isnot(None),
-                AppointmentAllocation.start_time < appt_end,
-                AppointmentAllocation.end_time > start_time,
-            ).with_for_update().all()
+    # Lock the user/resource master rows, then re-check for conflicts under the lock.
+    _lock_allocation_targets(payload.allocations, db)
     conflicts = _check_double_booking(payload.allocations, start_time, service_duration, db)
     if conflicts and not payload.override_double_booking:
         raise HTTPException(400, detail={
@@ -1406,7 +1473,7 @@ def create_appointment(
             "An authorizing staff member (overriding_user_id) is required to override a double-booking.",
         )
     if conflicts and payload.override_double_booking and payload.overriding_user_id:
-        _assert_override_authorizer(payload.overriding_user_id, clinic_id, db)
+        _assert_override_authorizer(payload.overriding_user_id, clinic_id, db, current_user)
 
     client_id, patient_id, client_name, patient_name = _resolve_client_patient(
         payload, clinic_id, current_user, db
@@ -1426,6 +1493,7 @@ def create_appointment(
         created_at=now,
         updated_at=now,
         created_by_user_id=current_user.id,
+        updated_by_user_id=current_user.id,
     )
 
     try:
@@ -1490,6 +1558,12 @@ def create_appointment(
         raise http_internal_error(exc, action="db_write")
 
     db.refresh(appt)
+    log_event(
+        "appointment_created",
+        user_id=current_user.id,
+        clinic_id=clinic_id,
+        appointment_id=appt.id,
+    )
     return AppointmentOut.model_validate(appt)
 
 
@@ -1515,8 +1589,16 @@ def update_appointment(
         if "status" in data:
             _apply_status_transition(appt, data["status"])
         appt.updated_at = utc_now()
+        appt.updated_by_user_id = current_user.id
         db.commit()
         db.refresh(appt)
+        log_event(
+            "appointment_updated",
+            user_id=current_user.id,
+            clinic_id=appt.clinic_id,
+            appointment_id=appt.id,
+            detail="status_only",
+        )
         return appt
 
     if appt.status == "cancelled":
@@ -1562,6 +1644,7 @@ def update_appointment(
         appt.clinic_id,
         db,
         exclude_appointment_id=appt.id,
+        enforce_future=payload.start_time is not None,
     )
     service_duration = service.default_duration_minutes
 
@@ -1580,27 +1663,10 @@ def update_appointment(
         (payload.override and soft)
         or (payload.override_double_booking and conflicts)
     ):
-        _assert_override_authorizer(payload.overriding_user_id, appt.clinic_id, db)
+        _assert_override_authorizer(payload.overriding_user_id, appt.clinic_id, db, current_user)
 
-    # Always lock overlapping allocation rows (excluding this appointment), then re-check.
-    appt_end = start_time + timedelta(minutes=service_duration)
-    for alloc_data in allocations:
-        if alloc_data.user_id:
-            db.query(AppointmentAllocation).filter(
-                AppointmentAllocation.user_id == alloc_data.user_id,
-                AppointmentAllocation.appointment_id != appt.id,
-                AppointmentAllocation.start_time.isnot(None),
-                AppointmentAllocation.start_time < appt_end,
-                AppointmentAllocation.end_time > start_time,
-            ).with_for_update().all()
-        if alloc_data.resource_id:
-            db.query(AppointmentAllocation).filter(
-                AppointmentAllocation.resource_id == alloc_data.resource_id,
-                AppointmentAllocation.appointment_id != appt.id,
-                AppointmentAllocation.start_time.isnot(None),
-                AppointmentAllocation.start_time < appt_end,
-                AppointmentAllocation.end_time > start_time,
-            ).with_for_update().all()
+    # Lock the user/resource master rows (see create_appointment), then re-check.
+    _lock_allocation_targets(allocations, db)
     conflicts = _check_double_booking(
         allocations,
         start_time,
@@ -1613,7 +1679,7 @@ def update_appointment(
     if conflicts and payload.override_double_booking and not payload.overriding_user_id:
         raise HTTPException(400, "overriding_user_id required to override a double-booking.")
     if conflicts and payload.override_double_booking and payload.overriding_user_id:
-        _assert_override_authorizer(payload.overriding_user_id, appt.clinic_id, db)
+        _assert_override_authorizer(payload.overriding_user_id, appt.clinic_id, db, current_user)
 
     if "status" in data:
         _apply_status_transition(appt, data["status"])
@@ -1630,6 +1696,7 @@ def update_appointment(
     appt.client_name = client_name
     appt.patient_name = patient_name
     appt.updated_at = utc_now()
+    appt.updated_by_user_id = current_user.id
 
     for old in list(appt.allocations):
         db.delete(old)
@@ -1691,6 +1758,13 @@ def update_appointment(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="db_write")
+    log_event(
+        "appointment_updated",
+        user_id=current_user.id,
+        clinic_id=appt.clinic_id,
+        appointment_id=appt.id,
+        detail="reschedule",
+    )
     return appt
 
 
@@ -1707,9 +1781,24 @@ def cancel_appointment(
         raise HTTPException(403, "Access denied.")
     _apply_status_transition(appt, "cancelled")
     appt.updated_at = utc_now()
+    appt.updated_by_user_id = current_user.id
     db.commit()
     db.refresh(appt)
+    log_event(
+        "appointment_cancelled",
+        user_id=current_user.id,
+        clinic_id=appt.clinic_id,
+        appointment_id=appt.id,
+    )
     return appt
+
+
+def _services_by_id(db: Session, service_ids) -> dict:
+    """Batch-fetch services by id (avoids a per-row db.get(Service, ...) in schedule loops)."""
+    ids = {sid for sid in service_ids if sid is not None}
+    if not ids:
+        return {}
+    return {s.id: s for s in db.query(Service).filter(Service.id.in_(ids)).all()}
 
 
 @app.get("/api/users/{user_id}/schedule", response_model=List[ScheduleEventOut])
@@ -1736,6 +1825,8 @@ def get_user_schedule(
     # Normalize to naive datetimes since the DB stores without TZ
     start_naive = to_utc_naive(start)
     end_naive = to_utc_naive(end)
+    if start_naive >= end_naive:
+        raise HTTPException(400, "Query param 'start' must be earlier than 'end'.")
 
     allocations = (
         db.query(AppointmentAllocation)
@@ -1750,10 +1841,11 @@ def get_user_schedule(
         .all()
     )
 
+    services_by_id = _services_by_id(db, {a.appointment.service_id for a in allocations})
     result = []
     for alloc in allocations:
         appt = alloc.appointment
-        service = db.get(Service, appt.service_id)
+        service = services_by_id.get(appt.service_id)
         result.append(ScheduleEventOut(
             allocation_id=alloc.id,
             appointment_id=appt.id,
@@ -1785,6 +1877,8 @@ def get_resource_schedule(
 
     start_naive = to_utc_naive(start)
     end_naive = to_utc_naive(end)
+    if start_naive >= end_naive:
+        raise HTTPException(400, "Query param 'start' must be earlier than 'end'.")
 
     allocations = (
         db.query(AppointmentAllocation)
@@ -1799,10 +1893,11 @@ def get_resource_schedule(
         .all()
     )
 
+    services_by_id = _services_by_id(db, {a.appointment.service_id for a in allocations})
     result = []
     for alloc in allocations:
         appt = alloc.appointment
-        service = db.get(Service, appt.service_id)
+        service = services_by_id.get(appt.service_id)
         result.append(ScheduleEventOut(
             allocation_id=alloc.id,
             appointment_id=appt.id,

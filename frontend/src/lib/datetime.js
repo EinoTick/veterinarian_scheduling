@@ -24,3 +24,12 @@ export function localDatetimeToUtcIso(value) {
   if (Number.isNaN(d.getTime())) return value;
   return d.toISOString();
 }
+
+/** Format an ISO datetime string (UTC) for display in the viewer's local time. */
+export function formatDateTime(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}

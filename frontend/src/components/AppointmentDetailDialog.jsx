@@ -7,21 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
 import { readErrorMessage, readJson } from "@/lib/http";
-
-const STATUS_VARIANT = {
-  scheduled: "secondary",
-  completed: "success",
-  cancelled: "outline",
-  no_show: "destructive",
-};
-
-function formatDateTime(iso) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
+import { formatDateTime } from "@/lib/datetime";
+import { APPOINTMENT_STATUS_VARIANT as STATUS_VARIANT } from "@/lib/constants";
 
 /**
  * Detail + status actions for a calendar event / appointment.

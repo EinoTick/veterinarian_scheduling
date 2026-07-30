@@ -202,7 +202,7 @@ export default function ClientsPage() {
               <Label>Name</Label>
               <Input value={patientForm.name} onChange={(e) => setPatientForm((f) => ({ ...f, name: e.target.value }))} required />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label>Species</Label>
                 <Input value={patientForm.species} onChange={(e) => setPatientForm((f) => ({ ...f, species: e.target.value }))} placeholder="Dog, Cat…" />

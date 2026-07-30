@@ -11,14 +11,14 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
+import { PRESENCE_TYPE_OPTIONS } from "@/lib/constants";
+import { readErrorMessage } from "@/lib/http";
 
 const NONE = "__none__";
 
 const PRESENCE_TYPES = [
   { value: NONE, label: "Any presence" },
-  { value: "IN_ROOM", label: "In Room" },
-  { value: "IN_BUILDING", label: "In Building" },
-  { value: "REMOTE", label: "Remote" },
+  ...PRESENCE_TYPE_OPTIONS,
 ];
 
 const RESOURCE_TYPES = [
@@ -222,6 +222,19 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
   async function handleSubmit(e) {
     e.preventDefault();
     setError(null);
+
+    if (
+      form.active_start_time &&
+      form.active_end_time &&
+      form.active_start_time === form.active_end_time
+    ) {
+      setError(
+        "Active-from and active-until cannot be the same time. Leave both blank for an " +
+          "all-day rule, or set a real range (from later than until is treated as overnight)."
+      );
+      return;
+    }
+
     setSubmitting(true);
 
     const body = buildBody();
@@ -240,8 +253,7 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
     setSubmitting(false);
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      setError(err.detail ?? "Failed to save rule.");
+      setError(await readErrorMessage(res, "Failed to save rule."));
       return;
     }
 
@@ -292,6 +304,13 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
                   ))}
                 </SelectContent>
               </Select>
+              {clinicId && (
+                <p className="text-xs text-muted-foreground">
+                  Clinic time zone: {clinics.find((c) => String(c.id) === clinicId)?.timezone ?? "UTC"}.
+                  Day/time scoping below (Active from/until, weekdays) is evaluated in that
+                  clinic&apos;s local time, not yours.
+                </p>
+              )}
             </div>
           )}
 
@@ -338,6 +357,7 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
                   <button
                     key={r.id}
                     type="button"
+                    aria-pressed={active}
                     onClick={() => toggleAltRole(r.id)}
                     className={`rounded px-2 py-0.5 text-xs border ${
                       active
@@ -352,7 +372,7 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label>Specific Resource</Label>
               <Select
@@ -393,7 +413,7 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label>Resource Type</Label>
               <Select
@@ -442,9 +462,11 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Timing & Presence
             </p>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <div className="space-y-1">
-                <Label className="text-xs">Offset (min)</Label>
+                <Label className="text-xs" title="How many minutes into the appointment this requirement starts">
+                  Starts after (min)
+                </Label>
                 <Input
                   type="number"
                   min="0"
@@ -453,11 +475,13 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">Duration (min)</Label>
+                <Label className="text-xs" title="How many minutes the requirement must be covered for, starting from 'Starts after'">
+                  Must last (min)
+                </Label>
                 <Input
                   type="number"
                   min="1"
-                  placeholder="Full"
+                  placeholder="Full appt."
                   value={form.duration_minutes}
                   onChange={(e) => setForm((f) => ({ ...f, duration_minutes: e.target.value }))}
                 />
@@ -478,8 +502,9 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Leave duration blank to only require that the role/resource is allocated at all.
-              Set offset+duration to require coverage of that window (e.g. first 20 minutes).
+              Leave the duration blank to just require the role/resource be assigned at some
+              point — e.g. a vet needed for the entire visit. Fill in both fields to require
+              coverage of a specific window — e.g. a vet in-room only for the first 20 minutes.
             </p>
           </div>
 
@@ -494,6 +519,7 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
                   <button
                     key={d.value}
                     type="button"
+                    aria-pressed={active}
                     onClick={() => toggleWeekday(d.value)}
                     className={`rounded px-2 py-1 text-xs border ${
                       active
@@ -507,7 +533,7 @@ export default function CreateRuleModal({ open, onClose, onSaved, rule = null })
               })}
             </div>
             <p className="text-xs text-muted-foreground">Leave all unselected = every day.</p>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div className="space-y-1">
                 <Label className="text-xs">Active from</Label>
                 <Input

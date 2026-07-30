@@ -55,6 +55,7 @@ export default function ResourcesPage() {
   }
 
   async function toggleActive(r) {
+    if (r.is_active && !window.confirm(`Deactivate "${r.name}"?`)) return;
     await apiFetch(`/api/resources/${r.id}`, {
       method: "PATCH",
       body: JSON.stringify({ is_active: !r.is_active }),

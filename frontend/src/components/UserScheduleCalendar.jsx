@@ -4,18 +4,7 @@ import timeGridPlugin from "@fullcalendar/timegrid";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import { useAuth } from "@/context/AuthContext";
 import AppointmentDetailDialog from "@/components/AppointmentDetailDialog";
-
-const PRESENCE_COLORS = {
-  IN_ROOM: "#3b82f6",
-  IN_BUILDING: "#8b5cf6",
-  REMOTE: "#10b981",
-};
-
-const PRESENCE_LABELS = {
-  IN_ROOM: "In Room",
-  IN_BUILDING: "In Building",
-  REMOTE: "Remote",
-};
+import { PRESENCE_TYPE_COLORS as PRESENCE_COLORS, PRESENCE_TYPE_LABELS as PRESENCE_LABELS } from "@/lib/constants";
 
 function eventOpacity(status) {
   if (status === "completed" || status === "no_show") return 0.55;

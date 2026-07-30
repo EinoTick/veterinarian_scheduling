@@ -54,6 +54,7 @@ export default function ServicesPage() {
   }
 
   async function toggleActive(s) {
+    if (s.is_active && !window.confirm(`Deactivate "${s.name}"?`)) return;
     await apiFetch(`/api/services/${s.id}`, {
       method: "PATCH",
       body: JSON.stringify({ is_active: !s.is_active }),

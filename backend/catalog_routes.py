@@ -5,11 +5,12 @@ Mounted from main.py.
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from auth import clinic_filter, get_current_user, hash_password, require_clinic_admin, revoke_all_refresh_tokens
 from database import get_db
-from errors import http_internal_error
+from errors import http_internal_error, log_event
 from models import Client, Patient, Resource, Role, Service, User
 from schemas import (
     ClientCreate, ClientOut, ClientUpdate,
@@ -89,6 +90,8 @@ def update_user(
         if pwd:
             user.hashed_password = hash_password(pwd)
             password_changed = True
+    system_role_changed = "system_role" in data and data["system_role"] != user.system_role
+    active_changed = "is_active" in data and data["is_active"] != user.is_active
     for key, value in data.items():
         setattr(user, key, value)
 
@@ -108,6 +111,22 @@ def update_user(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+
+    if password_changed:
+        log_event(
+            "user_password_reset", user_id=current_user.id, clinic_id=user.clinic_id,
+            detail=f"target_user={user.id}",
+        )
+    if system_role_changed:
+        log_event(
+            "user_role_changed", level=30, user_id=current_user.id, clinic_id=user.clinic_id,
+            detail=f"target_user={user.id} new_role={user.system_role}",
+        )
+    if active_changed:
+        log_event(
+            "user_active_changed", level=30, user_id=current_user.id, clinic_id=user.clinic_id,
+            detail=f"target_user={user.id} is_active={user.is_active}",
+        )
     return user
 
 
@@ -143,17 +162,21 @@ def create_role(
     else:
         clinic_id = _resolve_clinic_id(payload.clinic_id, current_user)
 
-    # Uniqueness within scope
+    name = payload.name.strip()
+
+    # Uniqueness within scope (case-insensitive — matches the DB-level
+    # expression index, so a duplicate reports a clean 400 instead of a raw
+    # IntegrityError).
     existing = (
         db.query(Role)
-        .filter(Role.name == payload.name, Role.clinic_id == clinic_id)
+        .filter(func.lower(Role.name) == name.lower(), Role.clinic_id == clinic_id)
         .first()
     )
     if existing:
         raise HTTPException(400, "A role with this name already exists in this scope.")
 
     role = Role(
-        name=payload.name,
+        name=name,
         can_prescribe=payload.can_prescribe,
         clinic_id=clinic_id,
         is_active=True,
@@ -166,6 +189,7 @@ def create_role(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("role_created", user_id=current_user.id, clinic_id=clinic_id, detail=f"role={role.id} name={role.name}")
     return role
 
 
@@ -189,6 +213,19 @@ def update_role(
         raise HTTPException(403, "Access denied.")
 
     data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] is not None:
+        data["name"] = data["name"].strip()
+        dupe = (
+            db.query(Role)
+            .filter(
+                func.lower(Role.name) == data["name"].lower(),
+                Role.clinic_id == role.clinic_id,
+                Role.id != role.id,
+            )
+            .first()
+        )
+        if dupe:
+            raise HTTPException(400, "A role with this name already exists in this scope.")
     for key, value in data.items():
         setattr(role, key, value)
     _stamp_update(role)
@@ -198,6 +235,7 @@ def update_role(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("role_updated", user_id=current_user.id, clinic_id=role.clinic_id, detail=f"role={role.id}")
     return role
 
 
@@ -227,7 +265,7 @@ def create_resource(
 
     resource = Resource(
         clinic_id=clinic_id,
-        name=payload.name,
+        name=payload.name.strip(),
         resource_type=payload.resource_type,
         category=payload.category,
         is_active=True,
@@ -240,6 +278,7 @@ def create_resource(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("resource_created", user_id=current_user.id, clinic_id=clinic_id, detail=f"resource={resource.id}")
     return resource
 
 
@@ -261,6 +300,8 @@ def update_resource(
         resource.category = None
     if "resource_type" in data and data["resource_type"] not in ("room", "equipment"):
         raise HTTPException(400, "resource_type must be 'room' or 'equipment'.")
+    if "name" in data and data["name"] is not None:
+        data["name"] = data["name"].strip()
     for key, value in data.items():
         setattr(resource, key, value)
     _stamp_update(resource)
@@ -270,6 +311,7 @@ def update_resource(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("resource_updated", user_id=current_user.id, clinic_id=resource.clinic_id, detail=f"resource={resource.id}")
     return resource
 
 
@@ -287,6 +329,7 @@ def delete_resource(
     resource.is_active = False
     _stamp_update(resource)
     db.commit()
+    log_event("resource_deleted", user_id=current_user.id, clinic_id=resource.clinic_id, detail=f"resource={resource.id}")
     return Response(status_code=204)
 
 
@@ -311,9 +354,10 @@ def create_service(
     db: Session = Depends(get_db),
 ):
     clinic_id = _resolve_clinic_id(payload.clinic_id, current_user)
+    name = payload.name.strip()
     existing = (
         db.query(Service)
-        .filter(Service.clinic_id == clinic_id, Service.name == payload.name)
+        .filter(Service.clinic_id == clinic_id, Service.name == name)
         .first()
     )
     if existing:
@@ -321,7 +365,7 @@ def create_service(
 
     service = Service(
         clinic_id=clinic_id,
-        name=payload.name,
+        name=name,
         default_duration_minutes=payload.default_duration_minutes,
         is_active=True,
     )
@@ -333,6 +377,7 @@ def create_service(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("service_created", user_id=current_user.id, clinic_id=clinic_id, detail=f"service={service.id}")
     return service
 
 
@@ -350,6 +395,8 @@ def update_service(
         raise HTTPException(403, "Access denied.")
 
     data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] is not None:
+        data["name"] = data["name"].strip()
     for key, value in data.items():
         setattr(service, key, value)
     _stamp_update(service)
@@ -359,6 +406,7 @@ def update_service(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("service_updated", user_id=current_user.id, clinic_id=service.clinic_id, detail=f"service={service.id}")
     return service
 
 
@@ -376,6 +424,7 @@ def delete_service(
     service.is_active = False
     _stamp_update(service)
     db.commit()
+    log_event("service_deleted", user_id=current_user.id, clinic_id=service.clinic_id, detail=f"service={service.id}")
     return Response(status_code=204)
 
 
@@ -414,7 +463,7 @@ def create_client(
     clinic_id = _resolve_clinic_id(payload.clinic_id, current_user)
     client = Client(
         clinic_id=clinic_id,
-        name=payload.name,
+        name=payload.name.strip(),
         email=str(payload.email) if payload.email else None,
         phone=payload.phone,
         notes=payload.notes,
@@ -428,6 +477,7 @@ def create_client(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("client_created", user_id=current_user.id, clinic_id=clinic_id, detail=f"client={client.id}")
     return client
 
 
@@ -453,6 +503,8 @@ def update_client(
         client.notes = None
     if "email" in data and data["email"] is not None:
         data["email"] = str(data["email"])
+    if "name" in data and data["name"] is not None:
+        data["name"] = data["name"].strip()
     for key, value in data.items():
         setattr(client, key, value)
     _stamp_update(client)
@@ -462,6 +514,7 @@ def update_client(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("client_updated", user_id=current_user.id, clinic_id=client.clinic_id, detail=f"client={client.id}")
     return client
 
 
@@ -480,7 +533,7 @@ def create_patient(
     patient = Patient(
         clinic_id=client.clinic_id,
         client_id=client.id,
-        name=payload.name,
+        name=payload.name.strip(),
         species=payload.species,
         breed=payload.breed,
         notes=payload.notes,
@@ -494,6 +547,7 @@ def create_patient(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("patient_created", user_id=current_user.id, clinic_id=patient.clinic_id, detail=f"patient={patient.id}")
     return patient
 
 
@@ -517,6 +571,8 @@ def update_patient(
         patient.breed = None
     if data.pop("clear_notes", False):
         patient.notes = None
+    if "name" in data and data["name"] is not None:
+        data["name"] = data["name"].strip()
     for key, value in data.items():
         setattr(patient, key, value)
     _stamp_update(patient)
@@ -526,6 +582,7 @@ def update_patient(
     except Exception as exc:
         db.rollback()
         raise http_internal_error(exc, action="catalog_write")
+    log_event("patient_updated", user_id=current_user.id, clinic_id=patient.clinic_id, detail=f"patient={patient.id}")
     return patient
 
 

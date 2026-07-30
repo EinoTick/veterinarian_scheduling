@@ -1,12 +1,7 @@
 import { useAuth } from "@/context/AuthContext";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-
-const ROLE_BADGE = {
-  SYSTEM_ADMIN: "destructive",
-  CLINIC_ADMIN: "default",
-  USER: "secondary",
-};
+import { ROLE_BADGE_VARIANT as ROLE_BADGE } from "@/lib/constants";
 
 export default function ProfilePage() {
   const { user } = useAuth();

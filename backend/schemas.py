@@ -432,6 +432,8 @@ class AppointmentOut(BaseModel):
     status: str
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    created_by_user_id: Optional[int] = None
+    updated_by_user_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

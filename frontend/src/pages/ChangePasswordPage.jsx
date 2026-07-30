@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { validatePassword, PASSWORD_HINT } from "@/lib/password";
+import { readErrorMessage } from "@/lib/http";
 
 export default function ChangePasswordPage() {
   const { apiFetch } = useAuth();
@@ -22,8 +24,9 @@ export default function ChangePasswordPage() {
       return;
     }
 
-    if (form.new_password.length < 8) {
-      setError("New password must be at least 8 characters.");
+    const pwError = validatePassword(form.new_password);
+    if (pwError) {
+      setError(pwError);
       return;
     }
 
@@ -47,8 +50,7 @@ export default function ChangePasswordPage() {
     setSubmitting(false);
 
     if (!res.ok) {
-      const err = await res.json();
-      setError(err.detail ?? "Failed to change password.");
+      setError(await readErrorMessage(res, "Failed to change password."));
       return;
     }
 
@@ -85,7 +87,9 @@ export default function ChangePasswordPage() {
                 value={form.new_password}
                 onChange={(e) => setForm((f) => ({ ...f, new_password: e.target.value }))}
                 required
+                minLength={10}
               />
+              <p className="text-xs text-muted-foreground">{PASSWORD_HINT}</p>
             </div>
             <div className="space-y-1">
               <Label>Confirm New Password</Label>

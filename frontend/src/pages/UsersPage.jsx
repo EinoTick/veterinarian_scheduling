@@ -9,12 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import CreateUserModal from "@/components/CreateUserModal";
 import UserScheduleDialog from "@/components/UserScheduleDialog";
 import { Plus } from "lucide-react";
-
-const ROLE_BADGE = {
-  SYSTEM_ADMIN: "destructive",
-  CLINIC_ADMIN: "default",
-  USER: "secondary",
-};
+import { ROLE_BADGE_VARIANT as ROLE_BADGE } from "@/lib/constants";
 
 export default function UsersPage() {
   const { apiFetch, user: currentUser } = useAuth();
@@ -47,6 +42,9 @@ export default function UsersPage() {
     e.stopPropagation();
     if (u.id === currentUser?.id && u.is_active) {
       setLoadError("You cannot deactivate your own account.");
+      return;
+    }
+    if (u.is_active && !window.confirm(`Deactivate ${u.name}? They will no longer be able to sign in.`)) {
       return;
     }
     const res = await apiFetch(`/api/users/${u.id}`, {
@@ -115,7 +113,16 @@ export default function UsersPage() {
                     <tr
                       key={u.id}
                       onClick={() => setScheduleUser(u)}
-                      className={`border-b last:border-0 cursor-pointer hover:bg-muted/50 transition-colors ${!u.is_active ? "opacity-50" : ""}`}
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`View ${u.name}'s schedule`}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setScheduleUser(u);
+                        }
+                      }}
+                      className={`border-b last:border-0 cursor-pointer hover:bg-muted/50 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring ${!u.is_active ? "opacity-50" : ""}`}
                     >
                       <td className="py-2 pr-4 font-medium">
                         {u.name}

@@ -221,6 +221,10 @@ class Appointment(Base, AuditMixin):
     patient_name = Column(String, nullable=False)
     # scheduled | completed | cancelled | no_show
     status = Column(String, default="scheduled", nullable=False)
+    # Who last touched this appointment (create/reschedule/status-change/cancel).
+    # created_by_user_id (from AuditMixin) never changes after creation; this
+    # does, on every subsequent mutation.
+    updated_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     clinic = relationship("Clinic", back_populates="appointments")
     service = relationship("Service", back_populates="appointments")

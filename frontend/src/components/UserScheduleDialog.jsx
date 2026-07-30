@@ -3,12 +3,7 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import UserScheduleCalendar from "@/components/UserScheduleCalendar";
-
-const ROLE_BADGE = {
-  SYSTEM_ADMIN: "destructive",
-  CLINIC_ADMIN: "default",
-  USER: "secondary",
-};
+import { ROLE_BADGE_VARIANT as ROLE_BADGE } from "@/lib/constants";
 
 export default function UserScheduleDialog({ user, open, onClose }) {
   return (

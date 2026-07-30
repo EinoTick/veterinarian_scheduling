@@ -14,8 +14,38 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-The SQLite database (`vet_clinic.db`) and all seed data are created automatically on first startup.
-Interactive API docs: http://localhost:8000/docs
+The backend targets PostgreSQL (see `backend/database.py`); the default
+`DATABASE_URL` expects the Postgres container from the root
+`docker-compose.yml` (`docker compose up -d`). Copy `backend/.env.example`
+to `backend/.env` and adjust as needed. Tables and demo seed data are
+created automatically on first startup (see "Production checklist" below —
+seeding only happens when `ENVIRONMENT` is not `production`).
+Interactive API docs: http://localhost:8000/docs (disabled when
+`ENVIRONMENT=production`).
+
+---
+
+## Production checklist
+
+This project's default configuration is tuned for local development. Before
+running it anywhere reachable by untrusted traffic:
+
+- Set `ENVIRONMENT=production` — disables demo-data seeding and the
+  `/docs`/`/redoc`/`/openapi.json` endpoints, and makes the app refuse to
+  start if `COOKIE_SECURE` isn't also `true`.
+- Set `COOKIE_SECURE=true` (requires serving over HTTPS).
+- Set a real `JWT_SECRET_KEY` — a long random value, e.g.
+  `python -c "import secrets; print(secrets.token_urlsafe(48))"`. The app
+  refuses to start with a missing/placeholder secret in any environment.
+- Set `CORS_ORIGINS` to your actual frontend origin(s) — never `*`.
+- Review `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` for
+  your session-length requirements.
+- Run `alembic upgrade head` (or let the app's startup hook do it) against
+  the target database before serving traffic — this is now the only schema
+  migration path (see `backend/alembic/versions/`).
+- Back up the database before upgrading. With the default Postgres setup:
+  - Backup: `docker exec <db-container> pg_dump -U vetclinic vetclinic > backup.sql`
+  - Restore: `docker exec -i <db-container> psql -U vetclinic vetclinic < backup.sql`
 
 ---
 

@@ -38,6 +38,7 @@ export default function RulesPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   async function deactivateRule(rule) {
+    if (!window.confirm(`Deactivate this rule?\n\n"${rule.description}"`)) return;
     const res = await apiFetch(`/api/rules/${rule.id}`, { method: "DELETE" });
     if (res.ok || res.status === 204) {
       invalidate(["rules"]);
@@ -159,6 +160,7 @@ export default function RulesPage() {
                             size="icon"
                             className="h-8 w-8"
                             title="Edit"
+                            aria-label="Edit rule"
                             onClick={() => { setEditingRule(r); setModalOpen(true); }}
                           >
                             <Pencil className="h-3.5 w-3.5" />
@@ -168,6 +170,7 @@ export default function RulesPage() {
                             size="icon"
                             className="h-8 w-8"
                             title={r.is_active ? "Deactivate" : "Reactivate"}
+                            aria-label={r.is_active ? "Deactivate rule" : "Reactivate rule"}
                             onClick={() => (r.is_active ? deactivateRule(r) : reactivateRule(r))}
                           >
                             <Power className={`h-3.5 w-3.5 ${r.is_active ? "" : "text-green-600"}`} />

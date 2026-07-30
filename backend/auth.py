@@ -6,9 +6,10 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 import bcrypt
+import jwt
 from fastapi import Cookie, Depends, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from jwt import PyJWTError
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -21,9 +22,15 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-in-production")
 ALGORITHM = "HS256"
 
 if SECRET_KEY in ("", "dev-secret-change-in-production", "change-this-to-a-long-random-secret-before-deploying"):
-    logger.warning(
-        "JWT_SECRET_KEY is missing or still a placeholder — sessions are not safe for any shared environment."
+    # Never acceptable, in any environment — a known/placeholder secret lets anyone
+    # forge valid session tokens. Refuse to start rather than run insecurely.
+    raise RuntimeError(
+        "JWT_SECRET_KEY is missing or still a placeholder. Set a long random secret "
+        "(e.g. `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`) before starting the app."
     )
+
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+IS_PRODUCTION = ENVIRONMENT == "production"
 
 # Short-lived access JWT; long-lived refresh token stored server-side (revocable).
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
@@ -36,6 +43,16 @@ ACCESS_COOKIE_PATH = "/api"
 REFRESH_COOKIE_PATH = "/api/auth"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()  # lax | strict | none
+
+if IS_PRODUCTION and not COOKIE_SECURE:
+    raise RuntimeError(
+        "COOKIE_SECURE must be true when ENVIRONMENT=production (cookies would otherwise "
+        "be sent over plaintext HTTP). Set COOKIE_SECURE=true behind HTTPS."
+    )
+elif not COOKIE_SECURE:
+    logger.warning(
+        "COOKIE_SECURE is false — fine for local HTTP development, but must be true in production."
+    )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
 
@@ -82,7 +99,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def decode_access_token(token: str) -> dict:
     payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     if payload.get("type") != "access":
-        raise JWTError("Not an access token")
+        raise PyJWTError("Not an access token")
     return payload
 
 
@@ -122,6 +139,33 @@ def revoke_all_refresh_tokens(db: Session, user_id: int) -> None:
         db.query(RefreshToken)
         .filter(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
         .update({"revoked_at": now}, synchronize_session=False)
+    )
+
+
+# Keep a little history around after revocation/expiry (useful if we ever need
+# to investigate a session) instead of deleting the instant a token goes stale.
+_STALE_TOKEN_RETENTION_DAYS = 30
+
+
+def purge_stale_refresh_tokens(db: Session, user_id: int) -> None:
+    """
+    Delete this user's own long-revoked/expired refresh token rows.
+
+    Called opportunistically on login/refresh so the table doesn't grow
+    without bound for active users. Scoped to a single user's rows so it's a
+    small, cheap, no-new-infrastructure fix (not a full cleanup job).
+    """
+    cutoff = datetime.utcnow() - timedelta(days=_STALE_TOKEN_RETENTION_DAYS)
+    (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.user_id == user_id,
+            (
+                (RefreshToken.revoked_at.isnot(None) & (RefreshToken.revoked_at < cutoff))
+                | (RefreshToken.expires_at < cutoff)
+            ),
+        )
+        .delete(synchronize_session=False)
     )
 
 
@@ -234,6 +278,7 @@ def issue_session(
         "clinic_id": user.clinic_id,
     })
     refresh = issue_refresh_token(db, user, user_agent=user_agent)
+    purge_stale_refresh_tokens(db, user.id)
     set_auth_cookies(response, access, refresh)
     return access, refresh
 
@@ -253,7 +298,7 @@ def get_current_user(
         user_id = payload.get("sub")
         if user_id is None:
             raise _CREDENTIALS_EXC
-    except JWTError:
+    except PyJWTError:
         raise _CREDENTIALS_EXC
 
     user = db.get(User, int(user_id))

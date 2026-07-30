@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
 import { validatePassword, PASSWORD_HINT } from "@/lib/password";
+import { readErrorMessage } from "@/lib/http";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -85,8 +86,7 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
     setSubmitting(false);
 
     if (!res.ok) {
-      const err = await res.json();
-      setError(err.detail ?? "Failed to create user.");
+      setError(await readErrorMessage(res, "Failed to create user."));
       return;
     }
 
@@ -104,7 +104,7 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label>Full Name</Label>
               <Input
@@ -132,14 +132,14 @@ export default function CreateUserModal({ open, onClose, onCreated }) {
               type="password"
               value={form.password}
               onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-              placeholder="Min. 8 chars, letter + number"
+              placeholder="Min. 10 chars, letter + number + uppercase/symbol"
               required
-              minLength={8}
+              minLength={10}
             />
             <p className="text-xs text-muted-foreground">{PASSWORD_HINT}</p>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label>Clinical Role</Label>
               <Select

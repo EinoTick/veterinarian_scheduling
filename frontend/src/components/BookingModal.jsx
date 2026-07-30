@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -14,16 +14,12 @@ import { AlertTriangle, ShieldAlert, Plus, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
 import {
+  formatDateTime,
   isPastLocalDatetime,
   localDatetimeToUtcIso,
   toLocalDatetimeValue,
 } from "@/lib/datetime";
-
-const PRESENCE_TYPES = [
-  { value: "IN_ROOM", label: "In Room" },
-  { value: "IN_BUILDING", label: "In Building" },
-  { value: "REMOTE", label: "Remote" },
-];
+import { PRESENCE_TYPE_OPTIONS as PRESENCE_TYPES } from "@/lib/constants";
 
 const EMPTY_FORM = {
   clinic_id: "",
@@ -35,11 +31,92 @@ const EMPTY_FORM = {
   resource_allocations: [],
 };
 
+/**
+ * One staff- or resource-allocation row. Shared between the staff and
+ * resource lists (they only differ by whether a presence-type selector is
+ * shown) so the two ~70-line near-identical blocks don't drift out of sync.
+ */
+function AllocationRow({
+  options,
+  optionLabel,
+  value,
+  onSelectChange,
+  selectPlaceholder,
+  presenceValue,
+  onPresenceChange,
+  offsetValue,
+  onOffsetChange,
+  durationValue,
+  onDurationChange,
+  onRemove,
+  disabled,
+}) {
+  return (
+    <div className="flex gap-2 items-center rounded-md border bg-muted/30 px-2 py-1.5">
+      <div className="flex-1 min-w-0">
+        <Select value={value} onValueChange={onSelectChange} disabled={disabled}>
+          <SelectTrigger className="h-7 text-xs">
+            <SelectValue placeholder={selectPlaceholder} />
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((o) => (
+              <SelectItem key={o.id} value={String(o.id)}>{optionLabel(o)}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {onPresenceChange && (
+        <div className="w-28">
+          <Select value={presenceValue} onValueChange={onPresenceChange} disabled={disabled}>
+            <SelectTrigger className="h-7 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PRESENCE_TYPES.map((pt) => (
+                <SelectItem key={pt.value} value={pt.value}>{pt.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      <Input
+        type="number"
+        min="0"
+        placeholder="0"
+        value={offsetValue}
+        onChange={onOffsetChange}
+        disabled={disabled}
+        className="h-7 w-14 text-xs text-center"
+      />
+      <Input
+        type="number"
+        min="1"
+        placeholder="Full"
+        value={durationValue}
+        onChange={onDurationChange}
+        disabled={disabled}
+        className="h-7 w-14 text-xs text-center"
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        onClick={onRemove}
+        disabled={disabled}
+        className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+      >
+        <X className="h-3 w-3" />
+      </Button>
+    </div>
+  );
+}
+
 export default function BookingModal({ open, onClose, onBooked }) {
   const { apiFetch, user } = useAuth();
   const { services: allServices, staff: allStaff, resources: allResources, rules: allRules, clinics, ensure, forClinic } =
     useCatalog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
+  const isOverrideAdmin = user?.system_role === "CLINIC_ADMIN" || user?.system_role === "SYSTEM_ADMIN";
 
   const [form, setForm] = useState(EMPTY_FORM);
   const [softViolations, setSoftViolations] = useState(null);
@@ -49,6 +126,10 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const [error, setError] = useState(null);
   const [livePreview, setLivePreview] = useState(null);
   const [minStart, setMinStart] = useState(() => toLocalDatetimeValue(new Date()));
+  // Stable per-row identity for React keys — array index breaks once a row
+  // in the middle of the list is removed.
+  const nextRowKey = useRef(0);
+  const newRowKey = () => (nextRowKey.current += 1);
 
   useEffect(() => {
     if (!open) return;
@@ -95,7 +176,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
       ...f,
       staff_allocations: [
         ...f.staff_allocations,
-        { user_id: "", presence_type: "IN_ROOM", start_offset_minutes: 0, duration_minutes: "" },
+        { _key: newRowKey(), user_id: "", presence_type: "IN_ROOM", start_offset_minutes: 0, duration_minutes: "" },
       ],
     }));
   }
@@ -138,7 +219,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
       ...f,
       resource_allocations: [
         ...f.resource_allocations,
-        { resource_id: "", start_offset_minutes: 0, duration_minutes: "" },
+        { _key: newRowKey(), resource_id: "", start_offset_minutes: 0, duration_minutes: "" },
       ],
     }));
   }
@@ -208,23 +289,31 @@ export default function BookingModal({ open, onClose, onBooked }) {
       return;
     }
 
+    const controller = new AbortController();
     const handle = setTimeout(async () => {
       try {
         const res = await apiFetch("/api/appointments/validate", {
           method: "POST",
           body: JSON.stringify(buildPayload()),
+          signal: controller.signal,
         });
         if (!res.ok) {
           setLivePreview(null);
           return;
         }
         setLivePreview(await res.json());
-      } catch {
+      } catch (err) {
+        // Aborted because a newer request superseded this one — let that
+        // one own the state update instead of clobbering it with null.
+        if (err?.name === "AbortError") return;
         setLivePreview(null);
       }
     }, 400);
 
-    return () => clearTimeout(handle);
+    return () => {
+      clearTimeout(handle);
+      controller.abort();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     open,
@@ -310,6 +399,16 @@ export default function BookingModal({ open, onClose, onBooked }) {
     form.service_id && form.start_time && form.client_name && form.patient_name &&
     (!isSystemAdmin || form.clinic_id);
 
+  // The backend only accepts overriding_user_id === current_user.id for
+  // non-admins (you can't attribute an override to someone else without
+  // proof they approved it) — so there's nothing for a non-admin to pick;
+  // lock it to themselves as soon as an override panel appears.
+  useEffect(() => {
+    if (!isOverrideAdmin && (hasSoftStop || hasDoubleBooking) && user) {
+      setOverridingUserId(String(user.id));
+    }
+  }, [isOverrideAdmin, hasSoftStop, hasDoubleBooking, user]);
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
       <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
@@ -341,6 +440,14 @@ export default function BookingModal({ open, onClose, onBooked }) {
                   ))}
                 </SelectContent>
               </Select>
+              {form.clinic_id && (
+                <p className="text-xs text-muted-foreground">
+                  Clinic time zone: {clinics.find((c) => String(c.id) === form.clinic_id)?.timezone ?? "UTC"}
+                  {" — times below are entered in "}
+                  {Intl.DateTimeFormat().resolvedOptions().timeZone}
+                  {", your local time zone."}
+                </p>
+              )}
             </div>
           )}
 
@@ -394,7 +501,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label>Client Name</Label>
               <Input
@@ -443,73 +550,22 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 </div>
                 <div className="space-y-1.5">
                   {form.staff_allocations.map((row, idx) => (
-                    <div
-                      key={idx}
-                      className="flex gap-2 items-center rounded-md border bg-muted/30 px-2 py-1.5"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <Select
-                          value={row.user_id}
-                          onValueChange={(v) => updateStaffRow(idx, "user_id", v)}
-                          disabled={formLocked}
-                        >
-                          <SelectTrigger className="h-7 text-xs">
-                            <SelectValue placeholder="Select staff…" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {staffOptionsForRow(idx).map((u) => (
-                              <SelectItem key={u.id} value={String(u.id)}>
-                                {u.name}{u.role ? ` · ${u.role.name}` : ""}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="w-28">
-                        <Select
-                          value={row.presence_type}
-                          onValueChange={(v) => updateStaffRow(idx, "presence_type", v)}
-                          disabled={formLocked}
-                        >
-                          <SelectTrigger className="h-7 text-xs">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {PRESENCE_TYPES.map((pt) => (
-                              <SelectItem key={pt.value} value={pt.value}>{pt.label}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <Input
-                        type="number"
-                        min="0"
-                        placeholder="0"
-                        value={row.start_offset_minutes}
-                        onChange={(e) => updateStaffRow(idx, "start_offset_minutes", e.target.value)}
-                        disabled={formLocked}
-                        className="h-7 w-14 text-xs text-center"
-                      />
-                      <Input
-                        type="number"
-                        min="1"
-                        placeholder="Full"
-                        value={row.duration_minutes}
-                        onChange={(e) => updateStaffRow(idx, "duration_minutes", e.target.value)}
-                        disabled={formLocked}
-                        className="h-7 w-14 text-xs text-center"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => removeStaffRow(idx)}
-                        disabled={formLocked}
-                        className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </div>
+                    <AllocationRow
+                      key={row._key}
+                      options={staffOptionsForRow(idx)}
+                      optionLabel={(u) => `${u.name}${u.role ? ` · ${u.role.name}` : ""}`}
+                      value={row.user_id}
+                      onSelectChange={(v) => updateStaffRow(idx, "user_id", v)}
+                      selectPlaceholder="Select staff…"
+                      presenceValue={row.presence_type}
+                      onPresenceChange={(v) => updateStaffRow(idx, "presence_type", v)}
+                      offsetValue={row.start_offset_minutes}
+                      onOffsetChange={(e) => updateStaffRow(idx, "start_offset_minutes", e.target.value)}
+                      durationValue={row.duration_minutes}
+                      onDurationChange={(e) => updateStaffRow(idx, "duration_minutes", e.target.value)}
+                      onRemove={() => removeStaffRow(idx)}
+                      disabled={formLocked}
+                    />
                   ))}
                 </div>
               </>
@@ -545,57 +601,20 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 </div>
                 <div className="space-y-1.5">
                   {form.resource_allocations.map((row, idx) => (
-                    <div
-                      key={idx}
-                      className="flex gap-2 items-center rounded-md border bg-muted/30 px-2 py-1.5"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <Select
-                          value={row.resource_id}
-                          onValueChange={(v) => updateResourceRow(idx, "resource_id", v)}
-                          disabled={formLocked}
-                        >
-                          <SelectTrigger className="h-7 text-xs">
-                            <SelectValue placeholder="Select resource…" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {resourceOptionsForRow(idx).map((r) => (
-                              <SelectItem key={r.id} value={String(r.id)}>
-                                {r.name} ({r.resource_type})
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <Input
-                        type="number"
-                        min="0"
-                        placeholder="0"
-                        value={row.start_offset_minutes}
-                        onChange={(e) => updateResourceRow(idx, "start_offset_minutes", e.target.value)}
-                        disabled={formLocked}
-                        className="h-7 w-14 text-xs text-center"
-                      />
-                      <Input
-                        type="number"
-                        min="1"
-                        placeholder="Full"
-                        value={row.duration_minutes}
-                        onChange={(e) => updateResourceRow(idx, "duration_minutes", e.target.value)}
-                        disabled={formLocked}
-                        className="h-7 w-14 text-xs text-center"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => removeResourceRow(idx)}
-                        disabled={formLocked}
-                        className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </div>
+                    <AllocationRow
+                      key={row._key}
+                      options={resourceOptionsForRow(idx)}
+                      optionLabel={(r) => `${r.name} (${r.resource_type})`}
+                      value={row.resource_id}
+                      onSelectChange={(v) => updateResourceRow(idx, "resource_id", v)}
+                      selectPlaceholder="Select resource…"
+                      offsetValue={row.start_offset_minutes}
+                      onOffsetChange={(e) => updateResourceRow(idx, "start_offset_minutes", e.target.value)}
+                      durationValue={row.duration_minutes}
+                      onDurationChange={(e) => updateResourceRow(idx, "duration_minutes", e.target.value)}
+                      onRemove={() => removeResourceRow(idx)}
+                      disabled={formLocked}
+                    />
                   ))}
                 </div>
               </>
@@ -624,7 +643,12 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 <Alert variant="destructive">
                   <AlertTitle>Double-booking risk</AlertTitle>
                   {livePreview.double_booking_conflicts.map((c, i) => (
-                    <AlertDescription key={i}>{c.entity} is already booked</AlertDescription>
+                    <AlertDescription key={i}>
+                      {c.entity} is already booked
+                      {c.start_time && c.end_time
+                        ? ` from ${formatDateTime(c.start_time)} to ${formatDateTime(c.end_time)}`
+                        : ""}
+                    </AlertDescription>
                   ))}
                 </Alert>
               )}
@@ -660,23 +684,32 @@ export default function BookingModal({ open, onClose, onBooked }) {
               </div>
               {doubleBookingConflicts.map((c, i) => (
                 <AlertDescription key={i} className="text-sm">
-                  <strong>{c.entity}</strong> is already scheduled during this time.
+                  <strong>{c.entity}</strong> is already scheduled
+                  {c.start_time && c.end_time
+                    ? ` from ${formatDateTime(c.start_time)} to ${formatDateTime(c.end_time)}.`
+                    : " during this time."}
                 </AlertDescription>
               ))}
               <div className="space-y-1 pt-1">
                 <Label>Who is authorizing this override? (required for audit log)</Label>
-                <Select value={overridingUserId} onValueChange={setOverridingUserId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select authorizing staff member…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {users.map((u) => (
-                      <SelectItem key={u.id} value={String(u.id)}>
-                        {u.name}{u.role ? ` · ${u.role.name}` : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                {isOverrideAdmin ? (
+                  <Select value={overridingUserId} onValueChange={setOverridingUserId}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select authorizing staff member…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {users.map((u) => (
+                        <SelectItem key={u.id} value={String(u.id)}>
+                          {u.name}{u.role ? ` · ${u.role.name}` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <p className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                    {user?.name} (you) — only you or a clinic admin can authorize this.
+                  </p>
+                )}
               </div>
             </Alert>
           )}
@@ -695,18 +728,24 @@ export default function BookingModal({ open, onClose, onBooked }) {
               ))}
               <div className="space-y-1 pt-1">
                 <Label>Who is authorizing this override? (required for audit log)</Label>
-                <Select value={overridingUserId} onValueChange={setOverridingUserId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select authorizing staff member…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {users.map((u) => (
-                      <SelectItem key={u.id} value={String(u.id)}>
-                        {u.name}{u.role ? ` · ${u.role.name}` : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                {isOverrideAdmin ? (
+                  <Select value={overridingUserId} onValueChange={setOverridingUserId}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select authorizing staff member…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {users.map((u) => (
+                        <SelectItem key={u.id} value={String(u.id)}>
+                          {u.name}{u.role ? ` · ${u.role.name}` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <p className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                    {user?.name} (you) — only you or a clinic admin can authorize this.
+                  </p>
+                )}
               </div>
             </Alert>
           )}

@@ -10,13 +10,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import BookingModal from "@/components/BookingModal";
 import { Plus } from "lucide-react";
 import { readErrorMessage } from "@/lib/http";
-
-function formatDateTime(iso) {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
+import { formatDateTime } from "@/lib/datetime";
+import { APPOINTMENT_STATUS_VARIANT as STATUS_VARIANT } from "@/lib/constants";
 
 function toDateInputValue(d) {
   const y = d.getFullYear();
@@ -46,13 +41,6 @@ function defaultRange() {
   end.setDate(end.getDate() + 60);
   return { start: toDateInputValue(start), end: toDateInputValue(end) };
 }
-
-const STATUS_VARIANT = {
-  scheduled: "secondary",
-  completed: "success",
-  cancelled: "outline",
-  no_show: "destructive",
-};
 
 const PAGE_SIZE = 50;
 
