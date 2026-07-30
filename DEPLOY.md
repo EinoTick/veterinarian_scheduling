@@ -115,8 +115,11 @@ leave demo passwords on an internet-facing host.
 - **Backups:** `docker compose -f docker-compose.prod.yml exec db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"`
 - **Logs:** `docker compose -f docker-compose.prod.yml logs -f api web`
 - **Health:** `https://<host>/health` (API DB ping) and container `web` `/healthz`
-- **Scaling:** login rate limiting is in-process — do not run multiple API
-  replicas until limits move to a shared store (see project review P1).
+- **Scaling:** set `RATE_LIMIT_BACKEND=redis` and `REDIS_URL` (add a Redis
+  service on the internal network) before running multiple API replicas.
+  Default `memory` backend is single-worker only.
+- Logout / password reset / user deactivate / role change bump
+  `users.session_version` so access JWTs fail immediately, not only after TTL.
 - **Dev compose** (`docker-compose.yml`) still publishes Postgres `:5432` for
   local uvicorn; never reuse that file as a public production deploy.
 

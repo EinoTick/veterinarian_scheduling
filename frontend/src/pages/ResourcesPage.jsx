@@ -14,6 +14,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Plus } from "lucide-react";
+import { readErrorMessage } from "@/lib/http";
 
 export default function ResourcesPage() {
   const { apiFetch, user } = useAuth();
@@ -24,11 +25,27 @@ export default function ResourcesPage() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", resource_type: "room", category: "", clinic_id: "" });
   const [error, setError] = useState(null);
+  const [loadError, setLoadError] = useState(null);
 
   const load = useCallback(async () => {
-    const res = await apiFetch(`/api/resources?include_inactive=${includeInactive}`);
-    if (res.ok) setItems(await res.json());
-    if (isSystemAdmin) await ensure(["clinics"]);
+    try {
+      const res = await apiFetch(`/api/resources?include_inactive=${includeInactive}`);
+      if (!res.ok) {
+        setLoadError(await readErrorMessage(res, "Failed to load resources."));
+        return;
+      }
+      setLoadError(null);
+      setItems(await res.json());
+      if (isSystemAdmin) {
+        try {
+          await ensure(["clinics"]);
+        } catch {
+          /* catalog banner surfaces this */
+        }
+      }
+    } catch {
+      setLoadError("Failed to load resources.");
+    }
   }, [apiFetch, ensure, includeInactive, isSystemAdmin]);
 
   useEffect(() => { load(); }, [load]);
@@ -36,6 +53,10 @@ export default function ResourcesPage() {
   async function create(e) {
     e.preventDefault();
     setError(null);
+    if (isSystemAdmin && !form.clinic_id) {
+      setError("Select a clinic for this resource.");
+      return;
+    }
     const body = {
       name: form.name,
       resource_type: form.resource_type,
@@ -44,8 +65,7 @@ export default function ResourcesPage() {
     if (isSystemAdmin && form.clinic_id) body.clinic_id = Number(form.clinic_id);
     const res = await apiFetch("/api/resources", { method: "POST", body: JSON.stringify(body) });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      setError(err.detail ?? "Failed to create resource.");
+      setError(await readErrorMessage(res, "Failed to create resource."));
       return;
     }
     setOpen(false);
@@ -56,10 +76,15 @@ export default function ResourcesPage() {
 
   async function toggleActive(r) {
     if (r.is_active && !window.confirm(`Deactivate "${r.name}"?`)) return;
-    await apiFetch(`/api/resources/${r.id}`, {
+    setLoadError(null);
+    const res = await apiFetch(`/api/resources/${r.id}`, {
       method: "PATCH",
       body: JSON.stringify({ is_active: !r.is_active }),
     });
+    if (!res.ok) {
+      setLoadError(await readErrorMessage(res, "Failed to update resource."));
+      return;
+    }
     invalidate(["resources"]);
     load();
   }
@@ -83,6 +108,11 @@ export default function ResourcesPage() {
       <Card>
         <CardHeader><CardTitle>Inventory</CardTitle></CardHeader>
         <CardContent>
+          {loadError ? (
+            <p className="text-sm text-destructive">{loadError}</p>
+          ) : items.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No resources found.</p>
+          ) : (
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b text-left text-muted-foreground">
@@ -113,6 +143,7 @@ export default function ResourcesPage() {
               ))}
             </tbody>
           </table>
+          )}
         </CardContent>
       </Card>
 

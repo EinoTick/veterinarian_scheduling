@@ -22,7 +22,11 @@ export default function RulesPage() {
 
   const loadData = useCallback(async () => {
     try {
-      await ensure(["services", "roles", "resources"]);
+      try {
+        await ensure(["services", "roles", "resources"]);
+      } catch {
+        /* catalog banner surfaces partial failures */
+      }
       const rulesRes = await apiFetch(`/api/rules?include_inactive=${includeInactive}`);
       if (!rulesRes.ok) {
         setLoadError("Failed to load rules.");

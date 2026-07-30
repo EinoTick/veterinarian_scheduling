@@ -142,6 +142,22 @@ def revoke_all_refresh_tokens(db: Session, user_id: int) -> None:
     )
 
 
+def bump_session_version(user: User) -> int:
+    """Invalidate outstanding access JWTs by advancing the session version."""
+    next_ver = int(getattr(user, "session_version", 0) or 0) + 1
+    user.session_version = next_ver
+    return next_ver
+
+
+def invalidate_user_sessions(db: Session, user: User) -> None:
+    """
+    Hard sign-out: revoke every refresh token and bump session_version so
+    existing access JWTs fail on the next authenticated request.
+    """
+    bump_session_version(user)
+    revoke_all_refresh_tokens(db, user.id)
+
+
 # Keep a little history around after revocation/expiry (useful if we ever need
 # to investigate a session) instead of deleting the instant a token goes stale.
 _STALE_TOKEN_RETENTION_DAYS = 30
@@ -276,6 +292,7 @@ def issue_session(
         "sub": str(user.id),
         "system_role": user.system_role,
         "clinic_id": user.clinic_id,
+        "sv": int(getattr(user, "session_version", 0) or 0),
     })
     refresh = issue_refresh_token(db, user, user_agent=user_agent)
     purge_stale_refresh_tokens(db, user.id)
@@ -290,7 +307,7 @@ def get_current_user(
     access_cookie: Optional[str] = Cookie(default=None, alias=ACCESS_COOKIE),
     db: Session = Depends(get_db),
 ) -> User:
-    token = access_cookie or bearer
+    token = bearer or access_cookie
     if not token:
         raise _CREDENTIALS_EXC
     try:
@@ -298,11 +315,14 @@ def get_current_user(
         user_id = payload.get("sub")
         if user_id is None:
             raise _CREDENTIALS_EXC
-    except PyJWTError:
+        token_sv = int(payload.get("sv", 0) or 0)
+    except (PyJWTError, TypeError, ValueError):
         raise _CREDENTIALS_EXC
 
     user = db.get(User, int(user_id))
     if not user or not user.is_active:
+        raise _CREDENTIALS_EXC
+    if int(getattr(user, "session_version", 0) or 0) != token_sv:
         raise _CREDENTIALS_EXC
     return user
 

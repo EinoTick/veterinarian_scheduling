@@ -14,6 +14,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Plus } from "lucide-react";
+import { readErrorMessage } from "@/lib/http";
 
 export default function ServicesPage() {
   const { apiFetch, user } = useAuth();
@@ -24,11 +25,27 @@ export default function ServicesPage() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", default_duration_minutes: "30", clinic_id: "" });
   const [error, setError] = useState(null);
+  const [loadError, setLoadError] = useState(null);
 
   const load = useCallback(async () => {
-    const res = await apiFetch(`/api/services?include_inactive=${includeInactive}`);
-    if (res.ok) setItems(await res.json());
-    if (isSystemAdmin) await ensure(["clinics"]);
+    try {
+      const res = await apiFetch(`/api/services?include_inactive=${includeInactive}`);
+      if (!res.ok) {
+        setLoadError(await readErrorMessage(res, "Failed to load services."));
+        return;
+      }
+      setLoadError(null);
+      setItems(await res.json());
+      if (isSystemAdmin) {
+        try {
+          await ensure(["clinics"]);
+        } catch {
+          /* catalog banner surfaces this */
+        }
+      }
+    } catch {
+      setLoadError("Failed to load services.");
+    }
   }, [apiFetch, ensure, includeInactive, isSystemAdmin]);
 
   useEffect(() => { load(); }, [load]);
@@ -36,6 +53,10 @@ export default function ServicesPage() {
   async function create(e) {
     e.preventDefault();
     setError(null);
+    if (isSystemAdmin && !form.clinic_id) {
+      setError("Select a clinic for this service.");
+      return;
+    }
     const body = {
       name: form.name,
       default_duration_minutes: Number(form.default_duration_minutes) || 30,
@@ -43,8 +64,7 @@ export default function ServicesPage() {
     if (isSystemAdmin && form.clinic_id) body.clinic_id = Number(form.clinic_id);
     const res = await apiFetch("/api/services", { method: "POST", body: JSON.stringify(body) });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      setError(err.detail ?? "Failed to create service.");
+      setError(await readErrorMessage(res, "Failed to create service."));
       return;
     }
     setOpen(false);
@@ -55,10 +75,15 @@ export default function ServicesPage() {
 
   async function toggleActive(s) {
     if (s.is_active && !window.confirm(`Deactivate "${s.name}"?`)) return;
-    await apiFetch(`/api/services/${s.id}`, {
+    setLoadError(null);
+    const res = await apiFetch(`/api/services/${s.id}`, {
       method: "PATCH",
       body: JSON.stringify({ is_active: !s.is_active }),
     });
+    if (!res.ok) {
+      setLoadError(await readErrorMessage(res, "Failed to update service."));
+      return;
+    }
     invalidate(["services"]);
     load();
   }
@@ -82,6 +107,11 @@ export default function ServicesPage() {
       <Card>
         <CardHeader><CardTitle>Service catalog</CardTitle></CardHeader>
         <CardContent>
+          {loadError ? (
+            <p className="text-sm text-destructive">{loadError}</p>
+          ) : items.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No services found.</p>
+          ) : (
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b text-left text-muted-foreground">
@@ -110,6 +140,7 @@ export default function ServicesPage() {
               ))}
             </tbody>
           </table>
+          )}
         </CardContent>
       </Card>
 

@@ -30,6 +30,52 @@ class PasswordChange(BaseModel):
 
 # ── Clinics ───────────────────────────────────────────────────────────────────
 
+def _validate_timezone(v: str) -> str:
+    from timeutil import validate_iana_timezone
+    name = (v or "").strip() or "UTC"
+    return validate_iana_timezone(name)
+
+
+class ClinicCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    timezone: str = "UTC"
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        name = (v or "").strip()
+        if not name:
+            raise ValueError("Clinic name is required.")
+        return name
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        return _validate_timezone(v)
+
+
+class ClinicUpdate(BaseModel):
+    name: Optional[str] = None
+    timezone: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        name = v.strip()
+        if not name:
+            raise ValueError("Clinic name cannot be blank.")
+        return name
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return _validate_timezone(v)
+
+
 class ClinicOut(BaseModel):
     id: int
     name: str
@@ -452,6 +498,7 @@ class AppointmentOut(BaseModel):
     patient_name: str
     status: str
     allocations: List[AllocationOut] = []
+    overrides: List["OverrideLogOut"] = []
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     created_by_user_id: Optional[int] = None
@@ -467,6 +514,36 @@ class AppointmentOut(BaseModel):
 
 class AppointmentListOut(BaseModel):
     items: List[AppointmentOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class OverrideLogOut(BaseModel):
+    id: int
+    appointment_id: int
+    clinic_id: Optional[int] = None
+    rule_id: Optional[int] = None
+    override_type: str
+    notes: Optional[str] = None
+    timestamp: Optional[datetime] = None
+    overridden_by_user_id: int
+    authorizer_name: Optional[str] = None
+    rule_description: Optional[str] = None
+    client_name: Optional[str] = None
+    patient_name: Optional[str] = None
+    service_id: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+    @field_serializer("timestamp")
+    def _ser_ts(self, v: Optional[datetime]) -> Optional[str]:
+        from timeutil import as_utc_iso
+        return as_utc_iso(v)
+
+
+class OverrideLogListOut(BaseModel):
+    items: List[OverrideLogOut]
     total: int
     limit: int
     offset: int

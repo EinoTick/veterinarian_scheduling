@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from auth import clinic_filter, get_current_user, hash_password, require_clinic_admin, revoke_all_refresh_tokens
+from auth import clinic_filter, get_current_user, hash_password, invalidate_user_sessions, require_clinic_admin
 from database import get_db
 from errors import http_internal_error, log_event
 from models import Client, Patient, Resource, Role, Service, User
@@ -104,8 +104,8 @@ def update_user(
 
     _stamp_update(user)
     try:
-        if password_changed:
-            revoke_all_refresh_tokens(db, user.id)
+        if password_changed or (active_changed and not user.is_active) or system_role_changed:
+            invalidate_user_sessions(db, user)
         db.commit()
         db.refresh(user)
     except Exception as exc:

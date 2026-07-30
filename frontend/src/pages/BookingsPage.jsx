@@ -62,7 +62,11 @@ export default function BookingsPage() {
     });
 
     try {
-      await ensure(["services", "clinics"]);
+      try {
+        await ensure(["services", "clinics"]);
+      } catch {
+        /* catalog banner surfaces partial failures */
+      }
       const apptsRes = await apiFetch(`/api/appointments?${qs}`);
       if (!apptsRes.ok) {
         setLoadError(await readErrorMessage(apptsRes, "Failed to load appointments."));

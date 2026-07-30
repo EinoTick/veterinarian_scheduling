@@ -4,6 +4,7 @@
  *
  * Failures are NOT cached as empty arrays — the next ensure() retries.
  * Per-key generation tokens ignore stale responses after invalidate / session change.
+ * Failed keys are reported via `errors` / `lastError` so callers can surface them.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
@@ -42,6 +43,7 @@ export function CatalogProvider({ children }) {
   const inflightRef = useRef({});
   const keyGenRef = useRef(emptyGens());
   const [version, setVersion] = useState(0);
+  const [errors, setErrors] = useState({});
   const userKey = user ? `${user.id}:${user.system_role}:${user.clinic_id ?? ""}` : null;
 
   const clearKeys = useCallback((keys) => {
@@ -50,6 +52,11 @@ export function CatalogProvider({ children }) {
       cacheRef.current[k] = null;
       delete inflightRef.current[k];
     }
+    setErrors((prev) => {
+      const next = { ...prev };
+      for (const k of keys) delete next[k];
+      return next;
+    });
     setVersion((n) => n + 1);
   }, []);
 
@@ -78,8 +85,23 @@ export function CatalogProvider({ children }) {
           }
           const list = Array.isArray(data) ? data : [];
           cacheRef.current[key] = list;
+          setErrors((prev) => {
+            if (!prev[key]) return prev;
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
           setVersion((n) => n + 1);
           return list;
+        } catch (err) {
+          if (myGen === keyGenRef.current[key]) {
+            setErrors((prev) => ({
+              ...prev,
+              [key]: err?.message || `Failed to load ${key}`,
+            }));
+            setVersion((n) => n + 1);
+          }
+          throw err;
         } finally {
           if (inflightRef.current[key] === promise) {
             delete inflightRef.current[key];
@@ -96,11 +118,11 @@ export function CatalogProvider({ children }) {
   const ensure = useCallback(
     async (keys = ALL_KEYS) => {
       const wanted = keys.filter((k) => PATHS[k]);
-      // Clinics are available to every authenticated user (own clinic or all for sysadmin).
       const results = await Promise.allSettled(wanted.map((k) => fetchKey(k)));
       const failed = results.filter((r) => r.status === "rejected");
-      if (failed.length && failed.length === results.length) {
-        throw failed[0].reason ?? new Error("Failed to load catalog.");
+      if (failed.length) {
+        const msg = failed.map((r) => r.reason?.message || "catalog load failed").join("; ");
+        throw new Error(msg || "Failed to load catalog.");
       }
       return cacheRef.current;
     },
@@ -114,6 +136,8 @@ export function CatalogProvider({ children }) {
     [clearKeys]
   );
 
+  const dismissErrors = useCallback(() => setErrors({}), []);
+
   const forClinic = useCallback((items, clinicId) => {
     if (clinicId == null || clinicId === "") return items ?? EMPTY;
     const cid = Number(clinicId);
@@ -122,6 +146,7 @@ export function CatalogProvider({ children }) {
 
   const value = useMemo(() => {
     const snap = cacheRef.current;
+    const failedKeys = Object.keys(errors);
     return {
       services: snap.services ?? EMPTY,
       staff: snap.staff ?? EMPTY,
@@ -133,6 +158,11 @@ export function CatalogProvider({ children }) {
       ensure,
       invalidate,
       forClinic,
+      errors,
+      lastError: failedKeys.length
+        ? `Could not load: ${failedKeys.join(", ")}`
+        : null,
+      dismissErrors,
       ready: {
         services: snap.services != null,
         staff: snap.staff != null,
@@ -143,7 +173,7 @@ export function CatalogProvider({ children }) {
         clients: snap.clients != null,
       },
     };
-  }, [ensure, invalidate, forClinic, version]);
+  }, [ensure, invalidate, forClinic, version, errors, dismissErrors]);
 
   return <CatalogContext.Provider value={value}>{children}</CatalogContext.Provider>;
 }

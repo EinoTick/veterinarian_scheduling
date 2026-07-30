@@ -73,6 +73,9 @@ class User(Base, TimestampMixin):
     # clinical role (Vet, Tech…); nullable for admin accounts
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
     is_active = Column(Boolean, default=True)
+    # Bumped on logout-all / password reset / deactivate / role change so
+    # outstanding access JWTs fail immediately (not only after TTL).
+    session_version = Column(Integer, nullable=False, default=0, server_default="0")
     created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     clinic = relationship("Clinic", back_populates="users", foreign_keys=[clinic_id])

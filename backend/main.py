@@ -10,25 +10,27 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 
 from auth import (
+    ACCESS_COOKIE,
     IS_PRODUCTION,
     REFRESH_COOKIE,
     clear_auth_cookies,
     clinic_filter,
     consume_refresh_token,
+    decode_access_token,
     get_current_user,
     hash_password,
+    invalidate_user_sessions,
     issue_session,
     lookup_refresh_token,
     require_clinic_admin,
     require_system_admin,
-    revoke_all_refresh_tokens,
-    revoke_refresh_token,
     run_dummy_password_check,
     verify_password,
 )
 from database import SessionLocal, engine, get_db
 from login_guard import (
     check_login_allowed,
+    get_login_rate_store,
     record_login_attempt,
     record_login_failure,
     record_login_success,
@@ -39,7 +41,8 @@ from models import (
 )
 from schemas import (
     APPOINTMENT_STATUSES, AppointmentCreate, AppointmentListOut, AppointmentOut, AppointmentUpdate,
-    AppointmentValidateOut, AllocationOut, AuthSessionOut, ClinicOut, PasswordChange, ResourceOut,
+    AppointmentValidateOut, AllocationOut, AuthSessionOut, ClinicCreate, ClinicOut, ClinicUpdate,
+    OverrideLogListOut, OverrideLogOut, PasswordChange, ResourceOut,
     RoleOut, RuleCreate, RuleOut, RuleUpdate, ScheduleEventOut, ServiceOut, SoftStopResponse,
     UserCreate, UserOut, ViolationDetail,
 )
@@ -253,6 +256,8 @@ def run_alembic_migrations() -> None:
 def on_startup():
     setup_logging()
     log_event("app_startup", msg="VetClinic API starting")
+    # Fail fast if Redis rate limiting was requested but is unreachable.
+    get_login_rate_store()
     try:
         run_alembic_migrations()
     except Exception as exc:
@@ -406,16 +411,48 @@ def logout(
     response: Response,
     db: Session = Depends(get_db),
 ):
+    """
+    Sign out this user everywhere: bump session_version (kills access JWTs)
+    and revoke all refresh tokens. Prefer a still-valid refresh cookie; fall
+    back to an access cookie only when its session_version still matches.
+    """
+    user = None
     raw = request.cookies.get(REFRESH_COOKIE)
     if raw:
         row = lookup_refresh_token(db, raw)
         if row:
-            revoke_refresh_token(row)
+            candidate = db.get(User, row.user_id)
+            if candidate and candidate.is_active:
+                user = candidate
+
+    if user is None:
+        access = request.cookies.get(ACCESS_COOKIE)
+        if access:
             try:
-                db.commit()
-            except Exception as exc:
-                db.rollback()
-                log_event("auth_logout_commit_failed", level=40, msg=str(exc))
+                payload = decode_access_token(access)
+                uid = payload.get("sub")
+                token_sv = int(payload.get("sv", 0) or 0)
+                if uid is not None:
+                    candidate = db.get(User, int(uid))
+                    if (
+                        candidate
+                        and candidate.is_active
+                        and int(getattr(candidate, "session_version", 0) or 0) == token_sv
+                    ):
+                        user = candidate
+            except Exception:
+                user = None
+
+    if user is not None:
+        invalidate_user_sessions(db, user)
+        try:
+            db.commit()
+            log_event("auth_logout", user_id=user.id, clinic_id=user.clinic_id)
+        except Exception as exc:
+            db.rollback()
+            log_event("auth_logout_commit_failed", level=40, msg=str(exc))
+            raise http_internal_error(exc, action="auth_logout")
+
     clear_auth_cookies(response)
     return AuthSessionOut(authenticated=False)
 
@@ -435,6 +472,7 @@ def get_me(
 
 @app.post("/api/auth/change-password")
 def change_password(
+    request: Request,
     response: Response,
     payload: PasswordChange,
     current_user: User = Depends(get_current_user),
@@ -444,9 +482,14 @@ def change_password(
         raise HTTPException(400, "Current password is incorrect.")
     try:
         current_user.hashed_password = hash_password(payload.new_password)
-        # Invalidate every refresh session, then mint a fresh one for this browser.
-        revoke_all_refresh_tokens(db, current_user.id)
-        issue_session(response, db, current_user)
+        # Kill every other session (and this one's old tokens), then mint fresh cookies.
+        invalidate_user_sessions(db, current_user)
+        issue_session(
+            response,
+            db,
+            current_user,
+            user_agent=request.headers.get("user-agent"),
+        )
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -545,8 +588,125 @@ def list_clinics(
     # SYSTEM_ADMIN operates across clinics; everyone else only ever needs
     # (and should only ever see) their own clinic's record.
     if current_user.system_role == "SYSTEM_ADMIN":
-        return db.query(Clinic).all()
-    return db.query(Clinic).filter(Clinic.id == current_user.clinic_id).all()
+        return db.query(Clinic).order_by(Clinic.name).all()
+    return (
+        db.query(Clinic)
+        .filter(Clinic.id == current_user.clinic_id)
+        .order_by(Clinic.name)
+        .all()
+    )
+
+
+@app.post("/api/clinics", response_model=ClinicOut, status_code=201)
+def create_clinic(
+    payload: ClinicCreate,
+    current_user: User = Depends(require_system_admin),
+    db: Session = Depends(get_db),
+):
+    clinic = Clinic(
+        name=payload.name,
+        timezone=payload.timezone,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    try:
+        db.add(clinic)
+        db.commit()
+        db.refresh(clinic)
+    except Exception as exc:
+        db.rollback()
+        raise http_internal_error(exc, action="clinic_create")
+    log_event(
+        "clinic_created",
+        user_id=current_user.id,
+        clinic_id=clinic.id,
+        detail=f"name={clinic.name} tz={clinic.timezone}",
+    )
+    return clinic
+
+
+@app.patch("/api/clinics/{clinic_id}", response_model=ClinicOut)
+def update_clinic(
+    clinic_id: int,
+    payload: ClinicUpdate,
+    current_user: User = Depends(require_clinic_admin),
+    db: Session = Depends(get_db),
+):
+    clinic = db.get(Clinic, clinic_id)
+    if not clinic:
+        raise HTTPException(404, "Clinic not found.")
+    if (
+        current_user.system_role != "SYSTEM_ADMIN"
+        and clinic.id != current_user.clinic_id
+    ):
+        raise HTTPException(403, "Access denied.")
+
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        return clinic
+    for key, value in data.items():
+        setattr(clinic, key, value)
+    clinic.updated_at = utc_now()
+    try:
+        db.commit()
+        db.refresh(clinic)
+    except Exception as exc:
+        db.rollback()
+        raise http_internal_error(exc, action="clinic_update")
+    log_event(
+        "clinic_updated",
+        user_id=current_user.id,
+        clinic_id=clinic.id,
+        detail=f"fields={','.join(data.keys())}",
+    )
+    return clinic
+
+
+@app.get("/api/override-logs", response_model=OverrideLogListOut)
+def list_override_logs(
+    override_type: Optional[str] = Query(None, description="soft_stop | double_booking"),
+    appointment_id: Optional[int] = Query(None),
+    start: Optional[datetime] = Query(None, description="Inclusive lower bound on timestamp (UTC)."),
+    end: Optional[datetime] = Query(None, description="Exclusive upper bound on timestamp (UTC)."),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(require_clinic_admin),
+    db: Session = Depends(get_db),
+):
+    if override_type is not None and override_type not in ("soft_stop", "double_booking"):
+        raise HTTPException(400, "override_type must be soft_stop or double_booking.")
+    q = (
+        db.query(OverrideLog)
+        .join(Appointment, OverrideLog.appointment_id == Appointment.id)
+    )
+    q = clinic_filter(q, Appointment, current_user)
+    if override_type:
+        q = q.filter(OverrideLog.override_type == override_type)
+    if appointment_id is not None:
+        q = q.filter(OverrideLog.appointment_id == appointment_id)
+    if start is not None:
+        q = q.filter(OverrideLog.timestamp >= to_utc_naive(start))
+    if end is not None:
+        q = q.filter(OverrideLog.timestamp < to_utc_naive(end))
+
+    total = q.count()
+    rows = (
+        q.options(
+            joinedload(OverrideLog.overridden_by_user),
+            joinedload(OverrideLog.rule),
+            joinedload(OverrideLog.appointment),
+        )
+        .order_by(OverrideLog.timestamp.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return OverrideLogListOut(
+        items=[_override_log_out(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.get("/api/rules", response_model=List[RuleOut])
@@ -1361,7 +1521,32 @@ def _allocation_out(alloc: AppointmentAllocation, appt_start: datetime) -> Alloc
     )
 
 
+def _override_log_out(log: OverrideLog) -> OverrideLogOut:
+    appt = log.appointment
+    authorizer = log.overridden_by_user
+    rule = log.rule
+    return OverrideLogOut(
+        id=log.id,
+        appointment_id=log.appointment_id,
+        clinic_id=appt.clinic_id if appt else None,
+        rule_id=log.rule_id,
+        override_type=log.override_type,
+        notes=log.notes,
+        timestamp=log.timestamp,
+        overridden_by_user_id=log.overridden_by_user_id,
+        authorizer_name=authorizer.name if authorizer else None,
+        rule_description=rule.description if rule else None,
+        client_name=appt.client_name if appt else None,
+        patient_name=appt.patient_name if appt else None,
+        service_id=appt.service_id if appt else None,
+    )
+
+
 def _appointment_out(appt: Appointment) -> AppointmentOut:
+    # Avoid lazy N+1 on list endpoints that do not joinedload override_logs.
+    overrides = []
+    if "override_logs" in appt.__dict__:
+        overrides = [_override_log_out(o) for o in (appt.override_logs or [])]
     return AppointmentOut(
         id=appt.id,
         clinic_id=appt.clinic_id,
@@ -1376,6 +1561,7 @@ def _appointment_out(appt: Appointment) -> AppointmentOut:
         allocations=[
             _allocation_out(a, appt.start_time) for a in (appt.allocations or [])
         ],
+        overrides=overrides,
         created_at=appt.created_at,
         updated_at=appt.updated_at,
         created_by_user_id=appt.created_by_user_id,
@@ -1386,7 +1572,11 @@ def _appointment_out(appt: Appointment) -> AppointmentOut:
 def _load_appointment(db: Session, appointment_id: int) -> Optional[Appointment]:
     return (
         db.query(Appointment)
-        .options(joinedload(Appointment.allocations))
+        .options(
+            joinedload(Appointment.allocations),
+            joinedload(Appointment.override_logs).joinedload(OverrideLog.overridden_by_user),
+            joinedload(Appointment.override_logs).joinedload(OverrideLog.rule),
+        )
         .filter(Appointment.id == appointment_id)
         .first()
     )

@@ -46,12 +46,25 @@ services:
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
       REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-memory}
+      REDIS_URL: ${REDIS_URL:-}
     depends_on:
       db:
         condition: service_healthy
     networks:
       - internal
     # Intentionally no host ports — reach the API only via the web proxy.
+
+  # Optional shared rate-limit store. Enable with:
+  #   RATE_LIMIT_BACKEND=redis
+  #   REDIS_URL=redis://redis:6379/0
+  # and uncomment `depends_on: redis` under api when scaling replicas.
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+  #   command: ["redis-server", "--save", "", "--appendonly", "no"]
+  #   networks:
+  #     - internal
 
   web:
     build:

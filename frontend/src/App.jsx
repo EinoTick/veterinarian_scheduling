@@ -15,6 +15,9 @@ import ResourceSchedule from "@/pages/ResourceSchedule";
 import ResourcesPage from "@/pages/ResourcesPage";
 import ServicesPage from "@/pages/ServicesPage";
 import ClientsPage from "@/pages/ClientsPage";
+import ClinicsPage from "@/pages/ClinicsPage";
+import OverridesPage from "@/pages/OverridesPage";
+import RolesPage from "@/pages/RolesPage";
 
 export default function App() {
   return (
@@ -36,9 +39,12 @@ export default function App() {
                   <Route path="change-password" element={<ChangePasswordPage />} />
                   <Route element={<ProtectedRoute roles={["CLINIC_ADMIN", "SYSTEM_ADMIN"]} />}>
                     <Route path="users" element={<UsersPage />} />
+                    <Route path="roles" element={<RolesPage />} />
                     <Route path="rules" element={<RulesPage />} />
                     <Route path="resources" element={<ResourcesPage />} />
                     <Route path="services" element={<ServicesPage />} />
+                    <Route path="overrides" element={<OverridesPage />} />
+                    <Route path="clinics" element={<ClinicsPage />} />
                   </Route>
                 </Route>
               </Route>

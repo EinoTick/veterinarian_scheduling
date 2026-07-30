@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -169,6 +169,33 @@ export default function AppointmentDetailDialog({
                           +{a.start_offset_minutes ?? 0}m
                           {a.duration_minutes != null ? ` / ${a.duration_minutes}m` : " / full"}
                         </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {(appt?.overrides ?? []).length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Overrides
+                  </p>
+                  <ul className="space-y-1 text-sm">
+                    {appt.overrides.map((o) => (
+                      <li key={o.id} className="rounded-md border px-2 py-1.5">
+                        <div className="flex justify-between gap-2">
+                          <span className="font-medium">
+                            {(o.override_type || "").replaceAll("_", " ")}
+                          </span>
+                          <span className="text-xs text-muted-foreground shrink-0">
+                            {formatInClinic(o.timestamp, clinicTz)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          by {o.authorizer_name || `#${o.overridden_by_user_id}`}
+                          {o.rule_description ? ` · ${o.rule_description}` : ""}
+                          {o.notes ? ` · ${o.notes}` : ""}
+                        </p>
                       </li>
                     ))}
                   </ul>
