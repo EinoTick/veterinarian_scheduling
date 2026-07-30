@@ -2,7 +2,9 @@ import { useRef, useState } from "react";
 import FullCalendar from "@fullcalendar/react";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import dayGridPlugin from "@fullcalendar/daygrid";
+import luxonPlugin from "@fullcalendar/luxon3";
 import { useAuth } from "@/context/AuthContext";
+import { useClinicTimezone } from "@/hooks/useClinicTimezone";
 import AppointmentDetailDialog from "@/components/AppointmentDetailDialog";
 import { PRESENCE_TYPE_COLORS as PRESENCE_COLORS, PRESENCE_TYPE_LABELS as PRESENCE_LABELS } from "@/lib/constants";
 
@@ -13,6 +15,7 @@ function eventOpacity(status) {
 
 export default function UserScheduleCalendar({ userId }) {
   const { apiFetch } = useAuth();
+  const clinicTz = useClinicTimezone();
   const [events, setEvents] = useState([]);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -48,8 +51,6 @@ export default function UserScheduleCalendar({ userId }) {
           end: e.end_time,
           backgroundColor: PRESENCE_COLORS[e.presence_type] ?? "#6b7280",
           borderColor: "transparent",
-          opacity: eventOpacity(e.status),
-          classNames: e.status && e.status !== "scheduled" ? [`status-${e.status}`] : [],
           extendedProps: {
             appointment_id: e.appointment_id,
             presence_type: e.presence_type,
@@ -85,11 +86,13 @@ export default function UserScheduleCalendar({ userId }) {
 
   return (
     <div>
+      <p className="text-xs text-muted-foreground mb-2">Calendar timezone: {clinicTz}</p>
       {error && <p className="text-sm text-destructive mb-3">{error}</p>}
       <div className="rounded-md border bg-card p-4">
         <FullCalendar
-          key={userId}
-          plugins={[timeGridPlugin, dayGridPlugin]}
+          key={`${userId}-${clinicTz}`}
+          plugins={[timeGridPlugin, dayGridPlugin, luxonPlugin]}
+          timeZone={clinicTz}
           initialView="timeGridWeek"
           headerToolbar={{
             left: "prev,next today",
@@ -101,8 +104,8 @@ export default function UserScheduleCalendar({ userId }) {
           eventClick={handleEventClick}
           height="auto"
           firstDay={1}
-          slotMinTime="07:00:00"
-          slotMaxTime="20:00:00"
+          slotMinTime="06:00:00"
+          slotMaxTime="22:00:00"
           nowIndicator={true}
           allDaySlot={false}
           eventContent={(arg) => (

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
 import { Button } from "@/components/ui/button";
@@ -8,38 +8,24 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import BookingModal from "@/components/BookingModal";
+import AppointmentDetailDialog from "@/components/AppointmentDetailDialog";
 import { Plus } from "lucide-react";
 import { readErrorMessage } from "@/lib/http";
-import { formatDateTime } from "@/lib/datetime";
+import {
+  clinicDayEndExclusiveIso,
+  clinicDayStartIso,
+  formatInClinic,
+} from "@/lib/datetime";
+import { useClinicTimezone } from "@/hooks/useClinicTimezone";
 import { APPOINTMENT_STATUS_VARIANT as STATUS_VARIANT } from "@/lib/constants";
+import { DateTime } from "luxon";
 
-function toDateInputValue(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-/** Local calendar day 00:00 → UTC ISO (date inputs are local, not Zulu). */
-function localDayStartIso(dateStr) {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d, 0, 0, 0, 0).toISOString();
-}
-
-/** Local calendar day after dateStr 00:00 → UTC ISO (exclusive end). */
-function localDayEndExclusiveIso(dateStr) {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d + 1, 0, 0, 0, 0).toISOString();
-}
-
-function defaultRange() {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - 120);
-  const end = new Date();
-  end.setHours(0, 0, 0, 0);
-  end.setDate(end.getDate() + 60);
-  return { start: toDateInputValue(start), end: toDateInputValue(end) };
+function defaultRange(clinicTz) {
+  const now = DateTime.now().setZone(clinicTz).startOf("day");
+  return {
+    start: now.minus({ days: 120 }).toISODate(),
+    end: now.plus({ days: 60 }).toISODate(),
+  };
 }
 
 const PAGE_SIZE = 50;
@@ -47,24 +33,25 @@ const PAGE_SIZE = 50;
 export default function BookingsPage() {
   const { apiFetch } = useAuth();
   const { services, ensure } = useCatalog();
-  const initial = useMemo(() => defaultRange(), []);
+  const clinicTz = useClinicTimezone();
   const [appointments, setAppointments] = useState([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [loadError, setLoadError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [detailId, setDetailId] = useState(null);
   const [showCancelled, setShowCancelled] = useState(false);
   const [busyId, setBusyId] = useState(null);
-  const [rangeStart, setRangeStart] = useState(initial.start);
-  const [rangeEnd, setRangeEnd] = useState(initial.end);
+  const [rangeStart, setRangeStart] = useState(() => defaultRange("UTC").start);
+  const [rangeEnd, setRangeEnd] = useState(() => defaultRange("UTC").end);
 
   const loadData = useCallback(async () => {
     if (rangeStart > rangeEnd) {
       setLoadError("Start date must be on or before end date.");
       return;
     }
-    const startIso = localDayStartIso(rangeStart);
-    const endIso = localDayEndExclusiveIso(rangeEnd);
+    const startIso = clinicDayStartIso(rangeStart, clinicTz);
+    const endIso = clinicDayEndExclusiveIso(rangeEnd, clinicTz);
 
     const qs = new URLSearchParams({
       include_cancelled: String(showCancelled),
@@ -75,7 +62,7 @@ export default function BookingsPage() {
     });
 
     try {
-      await ensure(["services"]);
+      await ensure(["services", "clinics"]);
       const apptsRes = await apiFetch(`/api/appointments?${qs}`);
       if (!apptsRes.ok) {
         setLoadError(await readErrorMessage(apptsRes, "Failed to load appointments."));
@@ -94,7 +81,7 @@ export default function BookingsPage() {
     } catch {
       setLoadError("Failed to load appointments.");
     }
-  }, [apiFetch, ensure, showCancelled, rangeStart, rangeEnd, offset]);
+  }, [apiFetch, ensure, showCancelled, rangeStart, rangeEnd, offset, clinicTz]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -135,7 +122,9 @@ export default function BookingsPage() {
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Bookings</h2>
-          <p className="text-sm text-muted-foreground">View and manage appointments</p>
+          <p className="text-sm text-muted-foreground">
+            View and manage appointments (times in {clinicTz})
+          </p>
         </div>
         <div className="flex items-center gap-4 flex-wrap">
           <div className="flex items-center gap-2">
@@ -196,15 +185,19 @@ export default function BookingsPage() {
                 </thead>
                 <tbody>
                   {appointments.map((a) => (
-                    <tr key={a.id} className={`border-b last:border-0 ${a.status === "cancelled" ? "opacity-50" : ""}`}>
+                    <tr
+                      key={a.id}
+                      className={`border-b last:border-0 cursor-pointer hover:bg-muted/40 ${a.status === "cancelled" ? "opacity-50" : ""}`}
+                      onClick={() => setDetailId(a.id)}
+                    >
                       <td className="py-2 pr-4 font-medium">{a.patient_name}</td>
                       <td className="py-2 pr-4 text-muted-foreground">{a.client_name}</td>
                       <td className="py-2 pr-4">{serviceName(a.service_id)}</td>
-                      <td className="py-2 pr-4">{formatDateTime(a.start_time)}</td>
+                      <td className="py-2 pr-4">{formatInClinic(a.start_time, clinicTz)}</td>
                       <td className="py-2 pr-4">
                         <Badge variant={STATUS_VARIANT[a.status] ?? "secondary"}>{a.status}</Badge>
                       </td>
-                      <td className="py-2">
+                      <td className="py-2" onClick={(e) => e.stopPropagation()}>
                         {a.status === "scheduled" && (
                           <div className="flex flex-wrap gap-1">
                             <Button
@@ -271,6 +264,13 @@ export default function BookingsPage() {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         onBooked={() => loadData()}
+      />
+
+      <AppointmentDetailDialog
+        appointmentId={detailId}
+        open={detailId != null}
+        onClose={() => setDetailId(null)}
+        onChanged={() => loadData()}
       />
     </div>
   );

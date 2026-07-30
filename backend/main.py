@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from auth import (
     IS_PRODUCTION,
@@ -39,7 +39,7 @@ from models import (
 )
 from schemas import (
     APPOINTMENT_STATUSES, AppointmentCreate, AppointmentListOut, AppointmentOut, AppointmentUpdate,
-    AppointmentValidateOut, AuthSessionOut, ClinicOut, PasswordChange, ResourceOut,
+    AppointmentValidateOut, AllocationOut, AuthSessionOut, ClinicOut, PasswordChange, ResourceOut,
     RoleOut, RuleCreate, RuleOut, RuleUpdate, ScheduleEventOut, ServiceOut, SoftStopResponse,
     UserCreate, UserOut, ViolationDetail,
 )
@@ -421,8 +421,16 @@ def logout(
 
 
 @app.get("/api/auth/me", response_model=UserOut)
-def get_me(current_user: User = Depends(get_current_user)):
-    return current_user
+def get_me(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    out = UserOut.model_validate(current_user)
+    if current_user.clinic_id:
+        clinic = db.get(Clinic, current_user.clinic_id)
+        if clinic:
+            out = out.model_copy(update={"clinic_timezone": clinic.timezone or "UTC"})
+    return out
 
 
 @app.post("/api/auth/change-password")
@@ -1239,7 +1247,7 @@ def _assert_override_authorizer(
 def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Session):
     """
     Resolve client/patient entities for a booking.
-    Prefers IDs; otherwise find-or-create from free-text names.
+    Prefers IDs. Free-text names find-or-create only when unambiguous.
     Returns (client_id, patient_id, client_name, patient_name).
     """
     client = None
@@ -1249,20 +1257,32 @@ def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Ses
         client = db.get(Client, payload.client_id)
         if not client or client.clinic_id != clinic_id:
             raise HTTPException(400, "Client not found in target clinic.")
-    elif payload.client_name:
-        client = (
+        if not client.is_active:
+            raise HTTPException(400, "Client is inactive.")
+    elif payload.client_name is not None:
+        name = (payload.client_name or "").strip()
+        if not name:
+            raise HTTPException(400, "client_name cannot be blank.")
+        matches = (
             db.query(Client)
             .filter(
                 Client.clinic_id == clinic_id,
-                Client.name == payload.client_name.strip(),
+                Client.name == name,
                 Client.is_active == True,
             )
-            .first()
+            .all()
         )
-        if not client:
+        if len(matches) > 1:
+            raise HTTPException(
+                400,
+                "Multiple clients share that name — select an existing client by id.",
+            )
+        if len(matches) == 1:
+            client = matches[0]
+        else:
             client = Client(
                 clinic_id=clinic_id,
-                name=payload.client_name.strip(),
+                name=name,
                 is_active=True,
                 created_at=utc_now(),
                 updated_at=utc_now(),
@@ -1275,27 +1295,39 @@ def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Ses
         patient = db.get(Patient, payload.patient_id)
         if not patient or patient.clinic_id != clinic_id:
             raise HTTPException(400, "Patient not found in target clinic.")
+        if not patient.is_active:
+            raise HTTPException(400, "Patient is inactive.")
         if client and patient.client_id != client.id:
             raise HTTPException(400, "Patient does not belong to the selected client.")
         if not client:
             client = db.get(Client, patient.client_id)
-    elif payload.patient_name:
+    elif payload.patient_name is not None:
+        name = (payload.patient_name or "").strip()
+        if not name:
+            raise HTTPException(400, "patient_name cannot be blank.")
         if not client:
             raise HTTPException(400, "A client is required before creating a patient by name.")
-        patient = (
+        matches = (
             db.query(Patient)
             .filter(
                 Patient.client_id == client.id,
-                Patient.name == payload.patient_name.strip(),
+                Patient.name == name,
                 Patient.is_active == True,
             )
-            .first()
+            .all()
         )
-        if not patient:
+        if len(matches) > 1:
+            raise HTTPException(
+                400,
+                "Multiple patients share that name under this client — select by id.",
+            )
+        if len(matches) == 1:
+            patient = matches[0]
+        else:
             patient = Patient(
                 clinic_id=clinic_id,
                 client_id=client.id,
-                name=payload.patient_name.strip(),
+                name=name,
                 is_active=True,
                 created_at=utc_now(),
                 updated_at=utc_now(),
@@ -1304,13 +1336,59 @@ def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Ses
             db.add(patient)
             db.flush()
 
-    client_name = client.name if client else (payload.client_name or "")
-    patient_name = patient.name if patient else (payload.patient_name or "")
+    if not client or not patient:
+        raise HTTPException(400, "Both client and patient are required.")
+
+    return (client.id, patient.id, client.name, patient.name)
+
+
+def _allocation_out(alloc: AppointmentAllocation, appt_start: datetime) -> AllocationOut:
+    offset = 0
+    duration = None
+    if alloc.start_time is not None and appt_start is not None:
+        offset = max(0, int((alloc.start_time - appt_start).total_seconds() // 60))
+    if alloc.start_time is not None and alloc.end_time is not None:
+        duration = max(1, int((alloc.end_time - alloc.start_time).total_seconds() // 60))
+    return AllocationOut(
+        id=alloc.id,
+        user_id=alloc.user_id,
+        resource_id=alloc.resource_id,
+        presence_type=alloc.presence_type,
+        start_time=alloc.start_time,
+        end_time=alloc.end_time,
+        start_offset_minutes=offset,
+        duration_minutes=duration,
+    )
+
+
+def _appointment_out(appt: Appointment) -> AppointmentOut:
+    return AppointmentOut(
+        id=appt.id,
+        clinic_id=appt.clinic_id,
+        service_id=appt.service_id,
+        client_id=appt.client_id,
+        patient_id=appt.patient_id,
+        start_time=appt.start_time,
+        end_time=appt.end_time,
+        client_name=appt.client_name,
+        patient_name=appt.patient_name,
+        status=appt.status,
+        allocations=[
+            _allocation_out(a, appt.start_time) for a in (appt.allocations or [])
+        ],
+        created_at=appt.created_at,
+        updated_at=appt.updated_at,
+        created_by_user_id=appt.created_by_user_id,
+        updated_by_user_id=appt.updated_by_user_id,
+    )
+
+
+def _load_appointment(db: Session, appointment_id: int) -> Optional[Appointment]:
     return (
-        client.id if client else None,
-        patient.id if patient else None,
-        client_name,
-        patient_name,
+        db.query(Appointment)
+        .options(joinedload(Appointment.allocations))
+        .filter(Appointment.id == appointment_id)
+        .first()
     )
 
 
@@ -1356,11 +1434,17 @@ def list_appointments(
     total = q.count()
     items = (
         q.order_by(Appointment.start_time.desc())
+        .options(joinedload(Appointment.allocations))
         .offset(offset)
         .limit(limit)
         .all()
     )
-    return AppointmentListOut(items=items, total=total, limit=limit, offset=offset)
+    return AppointmentListOut(
+        items=[_appointment_out(a) for a in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.get("/api/appointments/{appointment_id}", response_model=AppointmentOut)
@@ -1369,12 +1453,12 @@ def get_appointment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    appt = db.get(Appointment, appointment_id)
+    appt = _load_appointment(db, appointment_id)
     if not appt:
         raise HTTPException(404, "Appointment not found.")
     if current_user.system_role != "SYSTEM_ADMIN" and appt.clinic_id != current_user.clinic_id:
         raise HTTPException(403, "Access denied.")
-    return appt
+    return _appointment_out(appt)
 
 
 @app.post("/api/appointments/validate", response_model=AppointmentValidateOut)
@@ -1569,7 +1653,7 @@ def create_appointment(
         clinic_id=clinic_id,
         appointment_id=appt.id,
     )
-    return AppointmentOut.model_validate(appt)
+    return _appointment_out(_load_appointment(db, appt.id))
 
 
 @app.patch("/api/appointments/{appointment_id}", response_model=AppointmentOut)
@@ -1604,7 +1688,7 @@ def update_appointment(
             appointment_id=appt.id,
             detail="status_only",
         )
-        return appt
+        return _appointment_out(_load_appointment(db, appt.id))
 
     if appt.status == "cancelled":
         raise HTTPException(400, "Cancelled appointments cannot be rescheduled; create a new one.")
@@ -1770,7 +1854,7 @@ def update_appointment(
         appointment_id=appt.id,
         detail="reschedule",
     )
-    return appt
+    return _appointment_out(_load_appointment(db, appt.id))
 
 
 @app.post("/api/appointments/{appointment_id}/cancel", response_model=AppointmentOut)
@@ -1795,7 +1879,7 @@ def cancel_appointment(
         clinic_id=appt.clinic_id,
         appointment_id=appt.id,
     )
-    return appt
+    return _appointment_out(_load_appointment(db, appt.id))
 
 
 def _services_by_id(db: Session, service_ids) -> dict:

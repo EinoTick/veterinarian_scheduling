@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { useCatalog } from "@/context/CatalogContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +16,7 @@ import { Plus } from "lucide-react";
 
 export default function ClientsPage() {
   const { apiFetch, user } = useAuth();
+  const { invalidate } = useCatalog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
   const [clients, setClients] = useState([]);
   const [clinics, setClinics] = useState([]);
@@ -67,6 +69,7 @@ export default function ClientsPage() {
     }
     setClientOpen(false);
     setClientForm({ name: "", email: "", phone: "", clinic_id: "" });
+    invalidate(["clients"]);
     load();
   }
 
@@ -89,6 +92,7 @@ export default function ClientsPage() {
     }
     setPatientOpen(false);
     setPatientForm({ name: "", species: "", breed: "" });
+    invalidate(["clients"]);
     load();
   }
 

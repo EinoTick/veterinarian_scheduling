@@ -1,5 +1,5 @@
 /**
- * Shared clinic reference data (services, staff, resources, roles, rules, clinics).
+ * Shared clinic reference data (services, staff, resources, roles, rules, clinics, clients).
  * Deduplicates in-flight fetches so modals/pages do not hammer the API on every open.
  *
  * Failures are NOT cached as empty arrays — the next ensure() retries.
@@ -19,6 +19,7 @@ const PATHS = {
   roles: "/api/roles",
   rules: "/api/rules",
   clinics: "/api/clinics",
+  clients: "/api/clients",
 };
 
 const ALL_KEYS = Object.keys(PATHS);
@@ -36,6 +37,7 @@ export function CatalogProvider({ children }) {
     roles: null,
     rules: null,
     clinics: null,
+    clients: null,
   });
   const inflightRef = useRef({});
   const keyGenRef = useRef(emptyGens());
@@ -51,7 +53,6 @@ export function CatalogProvider({ children }) {
     setVersion((n) => n + 1);
   }, []);
 
-  // Drop cached lists when the session user changes (login/logout/clinic switch).
   useEffect(() => {
     clearKeys(ALL_KEYS);
   }, [userKey, clearKeys]);
@@ -95,18 +96,15 @@ export function CatalogProvider({ children }) {
   const ensure = useCallback(
     async (keys = ALL_KEYS) => {
       const wanted = keys.filter((k) => PATHS[k]);
-      const filtered =
-        user?.system_role === "SYSTEM_ADMIN"
-          ? wanted
-          : wanted.filter((k) => k !== "clinics");
-      const results = await Promise.allSettled(filtered.map((k) => fetchKey(k)));
+      // Clinics are available to every authenticated user (own clinic or all for sysadmin).
+      const results = await Promise.allSettled(wanted.map((k) => fetchKey(k)));
       const failed = results.filter((r) => r.status === "rejected");
       if (failed.length && failed.length === results.length) {
         throw failed[0].reason ?? new Error("Failed to load catalog.");
       }
       return cacheRef.current;
     },
-    [fetchKey, user?.system_role]
+    [fetchKey]
   );
 
   const invalidate = useCallback(
@@ -131,6 +129,7 @@ export function CatalogProvider({ children }) {
       roles: snap.roles ?? EMPTY,
       rules: snap.rules ?? EMPTY,
       clinics: snap.clinics ?? EMPTY,
+      clients: snap.clients ?? EMPTY,
       ensure,
       invalidate,
       forClinic,
@@ -141,6 +140,7 @@ export function CatalogProvider({ children }) {
         roles: snap.roles != null,
         rules: snap.rules != null,
         clinics: snap.clinics != null,
+        clients: snap.clients != null,
       },
     };
   }, [ensure, invalidate, forClinic, version]);

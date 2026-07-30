@@ -1,31 +1,97 @@
-/** Local datetime helpers for forms ↔ API UTC contract. */
+/**
+ * Clinic-timezone-aware datetime helpers (Luxon).
+ *
+ * Storage/API contract remains UTC with Z. Forms and calendars use the
+ * clinic's IANA timezone for wall-clock entry and display.
+ */
+import { DateTime } from "luxon";
 
-/** Format a Date for `<input type="datetime-local">` in local wall time. */
-export function toLocalDatetimeValue(date = new Date()) {
-  const d = new Date(date);
-  d.setSeconds(0, 0);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const LOCAL_FMT = "yyyy-MM-dd'T'HH:mm";
+
+export function normalizeClinicTz(tz) {
+  if (!tz || typeof tz !== "string") return "UTC";
+  return DateTime.now().setZone(tz).isValid ? tz : "UTC";
 }
 
-/** True when a datetime-local value is before now (local interpretation). */
-export function isPastLocalDatetime(value) {
+/** Now as datetime-local value in the clinic zone. */
+export function toClinicDatetimeValue(date = new Date(), clinicTz = "UTC") {
+  const zone = normalizeClinicTz(clinicTz);
+  return DateTime.fromJSDate(date instanceof Date ? date : new Date(date), { zone: "utc" })
+    .setZone(zone)
+    .toFormat(LOCAL_FMT);
+}
+
+/** True when a datetime-local wall time in clinic TZ is before "now" there. */
+export function isPastClinicDatetime(value, clinicTz = "UTC") {
   if (!value) return false;
-  return new Date(value).getTime() < Date.now();
+  const zone = normalizeClinicTz(clinicTz);
+  const dt = DateTime.fromFormat(value, LOCAL_FMT, { zone });
+  if (!dt.isValid) return false;
+  return dt < DateTime.now().setZone(zone);
 }
 
 /**
- * Convert a datetime-local value (local wall time, no offset) to UTC ISO with Z.
- * Backend treats naive timestamps as UTC — always send an offset/Z from the SPA.
+ * Convert a datetime-local value (clinic wall time) to UTC ISO with Z.
  */
-export function localDatetimeToUtcIso(value) {
+export function clinicDatetimeToUtcIso(value, clinicTz = "UTC") {
   if (!value) return value;
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toISOString();
+  const zone = normalizeClinicTz(clinicTz);
+  const dt = DateTime.fromFormat(value, LOCAL_FMT, { zone });
+  if (!dt.isValid) return value;
+  return dt.toUTC().toISO({ suppressMilliseconds: false });
 }
 
-/** Format an ISO datetime string (UTC) for display in the viewer's local time. */
+/** Convert a UTC ISO string to datetime-local value in clinic zone. */
+export function utcIsoToClinicDatetimeValue(iso, clinicTz = "UTC") {
+  if (!iso) return "";
+  const zone = normalizeClinicTz(clinicTz);
+  const dt = DateTime.fromISO(iso, { zone: "utc" }).setZone(zone);
+  if (!dt.isValid) return "";
+  return dt.toFormat(LOCAL_FMT);
+}
+
+/** Format UTC ISO for display in the clinic timezone. */
+export function formatInClinic(iso, clinicTz = "UTC") {
+  if (!iso) return "—";
+  const zone = normalizeClinicTz(clinicTz);
+  const dt = DateTime.fromISO(iso, { zone: "utc" }).setZone(zone);
+  if (!dt.isValid) return "—";
+  return dt.toLocaleString(DateTime.DATETIME_MED);
+}
+
+/** @deprecated Prefer clinic-aware helpers; kept for gradual migration. */
+export function toLocalDatetimeValue(date = new Date()) {
+  return toClinicDatetimeValue(date, DateTime.local().zoneName);
+}
+
+/** @deprecated Prefer isPastClinicDatetime */
+export function isPastLocalDatetime(value) {
+  return isPastClinicDatetime(value, DateTime.local().zoneName);
+}
+
+/** @deprecated Prefer clinicDatetimeToUtcIso */
+export function localDatetimeToUtcIso(value) {
+  return clinicDatetimeToUtcIso(value, DateTime.local().zoneName);
+}
+
+/** Inclusive start of a YYYY-MM-DD calendar day in clinic TZ → UTC ISO. */
+export function clinicDayStartIso(dateStr, clinicTz = "UTC") {
+  const zone = normalizeClinicTz(clinicTz);
+  return DateTime.fromISO(dateStr, { zone }).startOf("day").toUTC().toISO();
+}
+
+/** Exclusive end (next midnight) of a YYYY-MM-DD day in clinic TZ → UTC ISO. */
+export function clinicDayEndExclusiveIso(dateStr, clinicTz = "UTC") {
+  const zone = normalizeClinicTz(clinicTz);
+  return DateTime.fromISO(dateStr, { zone }).plus({ days: 1 }).startOf("day").toUTC().toISO();
+}
+
+/** Today as YYYY-MM-DD in clinic TZ. */
+export function clinicTodayDateInput(clinicTz = "UTC") {
+  return DateTime.now().setZone(normalizeClinicTz(clinicTz)).toISODate();
+}
+
+/** Format in viewer local time (fallback when clinic TZ is unavailable). */
 export function formatDateTime(iso) {
   if (!iso) return "—";
   return new Date(iso).toLocaleString(undefined, {

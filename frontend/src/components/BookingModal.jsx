@@ -13,11 +13,14 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle, ShieldAlert, Plus, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
+import { useClinicTimezone } from "@/hooks/useClinicTimezone";
 import {
-  formatDateTime,
-  isPastLocalDatetime,
-  localDatetimeToUtcIso,
-  toLocalDatetimeValue,
+  formatInClinic,
+  toClinicDatetimeValue,
+  isPastClinicDatetime,
+  clinicDatetimeToUtcIso,
+  utcIsoToClinicDatetimeValue,
+  normalizeClinicTz,
 } from "@/lib/datetime";
 import { PRESENCE_TYPE_OPTIONS as PRESENCE_TYPES } from "@/lib/constants";
 
@@ -25,8 +28,8 @@ const EMPTY_FORM = {
   clinic_id: "",
   service_id: "",
   start_time: "",
-  client_name: "",
-  patient_name: "",
+  client_id: "",
+  patient_id: "",
   staff_allocations: [],
   resource_allocations: [],
 };
@@ -111,12 +114,54 @@ function AllocationRow({
   );
 }
 
-export default function BookingModal({ open, onClose, onBooked }) {
+function formFromAppointment(appt, clinicTz, newRowKey) {
+  const staff_allocations = [];
+  const resource_allocations = [];
+  for (const a of appt.allocations || []) {
+    if (a.user_id != null) {
+      staff_allocations.push({
+        _key: newRowKey(),
+        user_id: String(a.user_id),
+        presence_type: a.presence_type || "IN_ROOM",
+        start_offset_minutes: a.start_offset_minutes ?? 0,
+        duration_minutes: a.duration_minutes != null ? a.duration_minutes : "",
+      });
+    } else if (a.resource_id != null) {
+      resource_allocations.push({
+        _key: newRowKey(),
+        resource_id: String(a.resource_id),
+        start_offset_minutes: a.start_offset_minutes ?? 0,
+        duration_minutes: a.duration_minutes != null ? a.duration_minutes : "",
+      });
+    }
+  }
+  return {
+    clinic_id: appt.clinic_id != null ? String(appt.clinic_id) : "",
+    service_id: appt.service_id != null ? String(appt.service_id) : "",
+    start_time: utcIsoToClinicDatetimeValue(appt.start_time, clinicTz),
+    client_id: appt.client_id != null ? String(appt.client_id) : "",
+    patient_id: appt.patient_id != null ? String(appt.patient_id) : "",
+    staff_allocations,
+    resource_allocations,
+  };
+}
+
+export default function BookingModal({ open, onClose, onBooked, appointment = null }) {
   const { apiFetch, user } = useAuth();
-  const { services: allServices, staff: allStaff, resources: allResources, rules: allRules, clinics, ensure, forClinic } =
-    useCatalog();
+  const {
+    services: allServices,
+    staff: allStaff,
+    resources: allResources,
+    rules: allRules,
+    clinics,
+    clients: allClients,
+    ensure,
+    forClinic,
+    invalidate,
+  } = useCatalog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
   const isOverrideAdmin = user?.system_role === "CLINIC_ADMIN" || user?.system_role === "SYSTEM_ADMIN";
+  const isEdit = Boolean(appointment?.id);
 
   const [form, setForm] = useState(EMPTY_FORM);
   const [softViolations, setSoftViolations] = useState(null);
@@ -125,7 +170,8 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [livePreview, setLivePreview] = useState(null);
-  const [minStart, setMinStart] = useState(() => toLocalDatetimeValue(new Date()));
+  const clinicTz = useClinicTimezone(form.clinic_id || null);
+  const [minStart, setMinStart] = useState(() => toClinicDatetimeValue(new Date(), "UTC"));
   // Stable per-row identity for React keys — array index breaks once a row
   // in the middle of the list is removed.
   const nextRowKey = useRef(0);
@@ -133,11 +179,41 @@ export default function BookingModal({ open, onClose, onBooked }) {
 
   useEffect(() => {
     if (!open) return;
-    setMinStart(toLocalDatetimeValue(new Date()));
-    const keys = ["services", "staff", "resources", "rules"];
-    if (isSystemAdmin) keys.push("clinics");
-    ensure(keys).catch(() => {});
-  }, [open, ensure, isSystemAdmin]);
+    let cancelled = false;
+
+    (async () => {
+      let cache = null;
+      try {
+        cache = await ensure(["services", "staff", "resources", "rules", "clinics", "clients"]);
+      } catch {
+        /* catalog may partially load; form still usable */
+      }
+      if (cancelled) return;
+
+      setSoftViolations(null);
+      setOverridingUserId("");
+      setDoubleBookingConflicts(null);
+      setError(null);
+      setLivePreview(null);
+      nextRowKey.current = 0;
+
+      if (appointment?.id) {
+        const clinicsList = cache?.clinics ?? clinics;
+        const clinic = clinicsList.find((c) => c.id === appointment.clinic_id);
+        const tz = normalizeClinicTz(clinic?.timezone || clinicTz);
+        setForm(formFromAppointment(appointment, tz, newRowKey));
+        setMinStart(toClinicDatetimeValue(new Date(), tz));
+      } else {
+        setForm(EMPTY_FORM);
+        setMinStart(toClinicDatetimeValue(new Date(), clinicTz));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, appointment?.id, ensure]);
 
   const clinicFilter = isSystemAdmin ? form.clinic_id : null;
   const services = useMemo(
@@ -155,6 +231,22 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const rules = useMemo(
     () => (isSystemAdmin ? forClinic(allRules, clinicFilter) : allRules),
     [allRules, clinicFilter, forClinic, isSystemAdmin]
+  );
+  const clients = useMemo(
+    () =>
+      (isSystemAdmin ? forClinic(allClients, clinicFilter) : allClients).filter(
+        (c) => c.is_active !== false
+      ),
+    [allClients, clinicFilter, forClinic, isSystemAdmin]
+  );
+
+  const selectedClient = useMemo(
+    () => clients.find((c) => String(c.id) === String(form.client_id)) ?? null,
+    [clients, form.client_id]
+  );
+  const patients = useMemo(
+    () => (selectedClient?.patients ?? []).filter((p) => p.is_active !== false),
+    [selectedClient]
   );
 
   function resetState() {
@@ -239,15 +331,17 @@ export default function BookingModal({ open, onClose, onBooked }) {
     });
   }
 
-  function buildPayload({ overrideDoubleBooking = false } = {}) {
+  function buildPayload({ overrideDoubleBooking = false, includeClinicId = !isEdit } = {}) {
     const softOverrideActive = softViolations !== null && !!overridingUserId;
     const doubleOverrideActive = overrideDoubleBooking && !!overridingUserId;
     return {
-      ...(isSystemAdmin && form.clinic_id ? { clinic_id: Number(form.clinic_id) } : {}),
+      ...(includeClinicId && isSystemAdmin && form.clinic_id
+        ? { clinic_id: Number(form.clinic_id) }
+        : {}),
       service_id: Number(form.service_id),
-      start_time: localDatetimeToUtcIso(form.start_time),
-      client_name: form.client_name,
-      patient_name: form.patient_name,
+      start_time: clinicDatetimeToUtcIso(form.start_time, clinicTz),
+      client_id: Number(form.client_id),
+      patient_id: Number(form.patient_id),
       allocations: [
         ...form.staff_allocations
           .filter((a) => a.user_id)
@@ -276,7 +370,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
   useEffect(() => {
     if (!open) return;
     if (softViolations || doubleBookingConflicts) return;
-    if (!form.service_id || !form.start_time || !form.client_name || !form.patient_name) {
+    if (!form.service_id || !form.start_time || !form.client_id || !form.patient_id) {
       setLivePreview(null);
       return;
     }
@@ -284,7 +378,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
       setLivePreview(null);
       return;
     }
-    if (isPastLocalDatetime(form.start_time)) {
+    if (isPastClinicDatetime(form.start_time, clinicTz)) {
       setLivePreview(null);
       return;
     }
@@ -294,7 +388,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
       try {
         const res = await apiFetch("/api/appointments/validate", {
           method: "POST",
-          body: JSON.stringify(buildPayload()),
+          body: JSON.stringify(buildPayload({ includeClinicId: true })),
           signal: controller.signal,
         });
         if (!res.ok) {
@@ -320,19 +414,20 @@ export default function BookingModal({ open, onClose, onBooked }) {
     form.clinic_id,
     form.service_id,
     form.start_time,
-    form.client_name,
-    form.patient_name,
+    form.client_id,
+    form.patient_id,
     form.staff_allocations,
     form.resource_allocations,
     softViolations,
     doubleBookingConflicts,
+    clinicTz,
   ]);
 
   async function submitBooking({ overrideDoubleBooking = false } = {}) {
     setSubmitting(true);
     setError(null);
 
-    if (isPastLocalDatetime(form.start_time)) {
+    if (isPastClinicDatetime(form.start_time, clinicTz)) {
       setSubmitting(false);
       setError({ type: "generic", message: "Start time cannot be in the past." });
       return;
@@ -354,10 +449,17 @@ export default function BookingModal({ open, onClose, onBooked }) {
 
     let res;
     try {
-      res = await apiFetch("/api/appointments", {
-        method: "POST",
-        body: JSON.stringify(buildPayload({ overrideDoubleBooking })),
-      });
+      if (isEdit) {
+        res = await apiFetch(`/api/appointments/${appointment.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(buildPayload({ overrideDoubleBooking, includeClinicId: false })),
+        });
+      } else {
+        res = await apiFetch("/api/appointments", {
+          method: "POST",
+          body: JSON.stringify(buildPayload({ overrideDoubleBooking, includeClinicId: true })),
+        });
+      }
     } catch {
       setSubmitting(false);
       setError({ type: "generic", message: "Network error — is the backend running?" });
@@ -368,6 +470,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
 
     if (res.ok) {
       const appt = await res.json();
+      invalidate(["clients"]);
       resetState();
       onBooked?.(appt);
       onClose();
@@ -396,7 +499,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
   const hasDoubleBooking = doubleBookingConflicts && doubleBookingConflicts.length > 0;
   const formLocked = hasSoftStop || hasDoubleBooking;
   const canSubmit =
-    form.service_id && form.start_time && form.client_name && form.patient_name &&
+    form.service_id && form.start_time && form.client_id && form.patient_id &&
     (!isSystemAdmin || form.clinic_id);
 
   // The backend only accepts overriding_user_id === current_user.id for
@@ -409,11 +512,21 @@ export default function BookingModal({ open, onClose, onBooked }) {
     }
   }, [isOverrideAdmin, hasSoftStop, hasDoubleBooking, user]);
 
+  const primaryLabel = isEdit
+    ? (submitting ? "Saving…" : "Save Changes")
+    : (submitting ? "Booking…" : "Book Appointment");
+  const overrideLabel = isEdit
+    ? (submitting ? "Saving…" : "Override & Save")
+    : (submitting ? "Saving…" : "Override & Book");
+  const overrideDoubleLabel = isEdit
+    ? (submitting ? "Saving…" : "Override & Save Anyway")
+    : (submitting ? "Saving…" : "Override & Book Anyway");
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
       <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>New Appointment</DialogTitle>
+          <DialogTitle>{isEdit ? "Edit Appointment" : "New Appointment"}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
@@ -427,11 +540,13 @@ export default function BookingModal({ open, onClose, onBooked }) {
                     ...f,
                     clinic_id: v,
                     service_id: "",
+                    client_id: "",
+                    patient_id: "",
                     staff_allocations: [],
                     resource_allocations: [],
                   }))
                 }
-                disabled={formLocked}
+                disabled={formLocked || isEdit}
               >
                 <SelectTrigger><SelectValue placeholder="Select clinic…" /></SelectTrigger>
                 <SelectContent>
@@ -440,14 +555,6 @@ export default function BookingModal({ open, onClose, onBooked }) {
                   ))}
                 </SelectContent>
               </Select>
-              {form.clinic_id && (
-                <p className="text-xs text-muted-foreground">
-                  Clinic time zone: {clinics.find((c) => String(c.id) === form.clinic_id)?.timezone ?? "UTC"}
-                  {" — times below are entered in "}
-                  {Intl.DateTimeFormat().resolvedOptions().timeZone}
-                  {", your local time zone."}
-                </p>
-              )}
             </div>
           )}
 
@@ -495,28 +602,55 @@ export default function BookingModal({ open, onClose, onBooked }) {
               type="datetime-local"
               value={form.start_time}
               min={minStart}
-              onFocus={() => setMinStart(toLocalDatetimeValue(new Date()))}
+              onFocus={() => setMinStart(toClinicDatetimeValue(new Date(), clinicTz))}
               onChange={(e) => setForm((f) => ({ ...f, start_time: e.target.value }))}
               disabled={formLocked}
             />
+            <p className="text-xs text-muted-foreground">Times are in {clinicTz}</p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label>Client Name</Label>
-              <Input
-                value={form.client_name}
-                onChange={(e) => setForm((f) => ({ ...f, client_name: e.target.value }))}
-                disabled={formLocked}
-              />
+              <Label>Client</Label>
+              {clients.length === 0 ? (
+                <p className="text-xs text-muted-foreground rounded-md border border-dashed p-2">
+                  No clients yet — add one under Clients.
+                </p>
+              ) : (
+                <Select
+                  value={form.client_id}
+                  onValueChange={(v) =>
+                    setForm((f) => ({ ...f, client_id: v, patient_id: "" }))
+                  }
+                  disabled={formLocked || (isSystemAdmin && !form.clinic_id)}
+                >
+                  <SelectTrigger><SelectValue placeholder="Select client…" /></SelectTrigger>
+                  <SelectContent>
+                    {clients.map((c) => (
+                      <SelectItem key={c.id} value={String(c.id)}>
+                        {c.name}{c.email ? ` · ${c.email}` : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
             <div className="space-y-1">
-              <Label>Patient Name</Label>
-              <Input
-                value={form.patient_name}
-                onChange={(e) => setForm((f) => ({ ...f, patient_name: e.target.value }))}
-                disabled={formLocked}
-              />
+              <Label>Patient</Label>
+              <Select
+                value={form.patient_id}
+                onValueChange={(v) => setForm((f) => ({ ...f, patient_id: v }))}
+                disabled={formLocked || !form.client_id}
+              >
+                <SelectTrigger><SelectValue placeholder="Select patient…" /></SelectTrigger>
+                <SelectContent>
+                  {patients.map((p) => (
+                    <SelectItem key={p.id} value={String(p.id)}>
+                      {p.name}{p.species ? ` · ${p.species}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -646,7 +780,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                     <AlertDescription key={i}>
                       {c.entity} is already booked
                       {c.start_time && c.end_time
-                        ? ` from ${formatDateTime(c.start_time)} to ${formatDateTime(c.end_time)}`
+                        ? ` from ${formatInClinic(c.start_time, clinicTz)} to ${formatInClinic(c.end_time, clinicTz)}`
                         : ""}
                     </AlertDescription>
                   ))}
@@ -686,7 +820,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 <AlertDescription key={i} className="text-sm">
                   <strong>{c.entity}</strong> is already scheduled
                   {c.start_time && c.end_time
-                    ? ` from ${formatDateTime(c.start_time)} to ${formatDateTime(c.end_time)}.`
+                    ? ` from ${formatInClinic(c.start_time, clinicTz)} to ${formatInClinic(c.end_time, clinicTz)}.`
                     : " during this time."}
                 </AlertDescription>
               ))}
@@ -759,7 +893,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
               onClick={() => submitBooking()}
               disabled={submitting || !canSubmit}
             >
-              {submitting ? "Booking…" : "Book Appointment"}
+              {primaryLabel}
             </Button>
           )}
 
@@ -776,7 +910,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 onClick={() => submitBooking()}
                 disabled={submitting || !overridingUserId}
               >
-                {submitting ? "Saving…" : "Override & Book"}
+                {overrideLabel}
               </Button>
             </>
           )}
@@ -798,7 +932,7 @@ export default function BookingModal({ open, onClose, onBooked }) {
                 onClick={() => submitBooking({ overrideDoubleBooking: true })}
                 disabled={submitting || !overridingUserId}
               >
-                {submitting ? "Saving…" : "Override & Book Anyway"}
+                {overrideDoubleLabel}
               </Button>
             </>
           )}

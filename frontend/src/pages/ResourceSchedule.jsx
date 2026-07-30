@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import FullCalendar from "@fullcalendar/react";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import dayGridPlugin from "@fullcalendar/daygrid";
+import luxonPlugin from "@fullcalendar/luxon3";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
+import { useClinicTimezone } from "@/hooks/useClinicTimezone";
 import AppointmentDetailDialog from "@/components/AppointmentDetailDialog";
 
 const TYPE_COLORS = {
@@ -18,6 +20,7 @@ const TYPE_COLORS = {
 export default function ResourceSchedule() {
   const { apiFetch } = useAuth();
   const { resources, ensure } = useCatalog();
+  const clinicTz = useClinicTimezone();
   const [selectedId, setSelectedId] = useState("");
   const [events, setEvents] = useState([]);
   const [error, setError] = useState(null);
@@ -27,7 +30,7 @@ export default function ResourceSchedule() {
   const abortRef = useRef(null);
 
   useEffect(() => {
-    ensure(["resources"]).catch(() => {});
+    ensure(["resources", "clinics"]).catch(() => {});
   }, [ensure]);
 
   async function fetchSchedule(resourceId, startStr, endStr) {
@@ -111,6 +114,7 @@ export default function ResourceSchedule() {
       <h1 className="text-xl font-semibold mb-1">Rooms & Equipment</h1>
       <p className="text-sm text-muted-foreground mb-4">
         View booking blocks for a specific room or piece of equipment. Click an event for details.
+        Times shown in {clinicTz}.
       </p>
 
       <div className="mb-5 max-w-xs">
@@ -155,7 +159,9 @@ export default function ResourceSchedule() {
           )}
           <div className="rounded-md border bg-card p-4">
             <FullCalendar
-              plugins={[timeGridPlugin, dayGridPlugin]}
+              key={`${selectedId}-${clinicTz}`}
+              plugins={[timeGridPlugin, dayGridPlugin, luxonPlugin]}
+              timeZone={clinicTz}
               initialView="timeGridWeek"
               headerToolbar={{
                 left: "prev,next today",
@@ -167,8 +173,8 @@ export default function ResourceSchedule() {
               eventClick={handleEventClick}
               height="auto"
               firstDay={1}
-              slotMinTime="07:00:00"
-              slotMaxTime="20:00:00"
+              slotMinTime="06:00:00"
+              slotMaxTime="22:00:00"
               nowIndicator={true}
               allDaySlot={false}
               eventContent={(arg) => (

@@ -111,6 +111,8 @@ class UserOut(BaseModel):
     is_active: bool
     clinic_id: Optional[int]
     role: Optional[RoleOut]
+    # IANA TZ for the user's clinic (SYSTEM_ADMIN without clinic → None).
+    clinic_timezone: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -419,6 +421,25 @@ class AppointmentValidateOut(BaseModel):
     double_booking_conflicts: List[dict] = []
 
 
+class AllocationOut(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    resource_id: Optional[int] = None
+    presence_type: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    # Derived from appointment start for edit forms (not stored columns).
+    start_offset_minutes: int = 0
+    duration_minutes: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+    @field_serializer("start_time", "end_time")
+    def _ser_utc(self, v: Optional[datetime]) -> Optional[str]:
+        from timeutil import as_utc_iso
+        return as_utc_iso(v)
+
+
 class AppointmentOut(BaseModel):
     id: int
     clinic_id: int
@@ -430,6 +451,7 @@ class AppointmentOut(BaseModel):
     client_name: str
     patient_name: str
     status: str
+    allocations: List[AllocationOut] = []
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     created_by_user_id: Optional[int] = None
