@@ -1,0 +1,18 @@
+# Root context is used when building the web image (frontend/Dockerfile).
+.git
+.github
+**/.venv
+**/node_modules
+**/__pycache__
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+backend/.pytest_cache
+frontend/playwright-report
+frontend/test-results
+*.md
+!DEPLOY.md
+agent-transcripts
+.cursor

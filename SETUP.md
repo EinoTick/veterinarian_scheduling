@@ -39,8 +39,13 @@ running it anywhere reachable by untrusted traffic:
   `python -c "import secrets; print(secrets.token_urlsafe(48))"`. The app
   refuses to start with a missing/placeholder secret in any environment.
 - Set `CORS_ORIGINS` to your actual frontend origin(s) — never `*`.
+- Set `TRUST_PROXY=true` when the API sits behind a reverse proxy that
+  sets `X-Forwarded-For` / `X-Forwarded-Proto` (required for
+  `docker-compose.prod.yml`).
 - Review `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` for
   your session-length requirements.
+- Prefer the packaged stack in **[DEPLOY.md](./DEPLOY.md)** (`docker-compose.prod.yml`)
+  over publishing Postgres to the host.
 - Run `alembic upgrade head` (or let the app's startup hook do it) against
   the target database before serving traffic. Alembic is the **only** schema
   ownership path: revision `000_schema_baseline` creates the full table set

@@ -50,3 +50,17 @@ npm install
 The database schema is applied automatically on backend startup via Alembic
 (`alembic upgrade head`). Demo seed data is loaded when `ENVIRONMENT` is not
 `production`.
+
+## Production-like Docker stack
+
+For API + SPA images, HTTPS edge proxy, secrets file, and a DB that is **not**
+exposed on the host, see **[DEPLOY.md](./DEPLOY.md)**.
+
+```powershell
+copy .env.prod.example .env.prod
+# edit secrets in .env.prod
+.\deploy\scripts\gen-dev-certs.ps1
+docker compose -f docker-compose.prod.yml --env-file .env.prod up --build -d
+```
+
+Then open `https://localhost` (accept the self-signed certificate warning for local smoke tests).

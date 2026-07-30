@@ -6,10 +6,17 @@ services:
       POSTGRES_DB: vetclinic
       POSTGRES_USER: vetclinic
       POSTGRES_PASSWORD: vetclinic_dev
+    # Published for local uvicorn/Vite against Docker Postgres.
+    # Production topology: use docker-compose.prod.yml (DB is not published).
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vetclinic -d vetclinic"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres_data:
