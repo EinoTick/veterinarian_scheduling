@@ -17,9 +17,10 @@ uvicorn main:app --reload --port 8000
 The backend targets PostgreSQL (see `backend/database.py`); the default
 `DATABASE_URL` expects the Postgres container from the root
 `docker-compose.yml` (`docker compose up -d`). Copy `backend/.env.example`
-to `backend/.env` and adjust as needed. Tables and demo seed data are
-created automatically on first startup (see "Production checklist" below —
-seeding only happens when `ENVIRONMENT` is not `production`).
+to `backend/.env` and adjust as needed. On first startup the app runs
+`alembic upgrade head` (full schema from `backend/alembic/versions/`, starting
+at `000_schema_baseline`) and then seeds demo data when `ENVIRONMENT` is not
+`production`. There is no SQLAlchemy `create_all` — Alembic owns the schema.
 Interactive API docs: http://localhost:8000/docs (disabled when
 `ENVIRONMENT=production`).
 
@@ -41,8 +42,14 @@ running it anywhere reachable by untrusted traffic:
 - Review `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` for
   your session-length requirements.
 - Run `alembic upgrade head` (or let the app's startup hook do it) against
-  the target database before serving traffic — this is now the only schema
-  migration path (see `backend/alembic/versions/`).
+  the target database before serving traffic. Alembic is the **only** schema
+  ownership path: revision `000_schema_baseline` creates the full table set
+  (including `refresh_tokens`); later revisions are incremental and
+  idempotent where possible. Do not rely on SQLAlchemy `create_all`.
+  See `backend/alembic/versions/`.
+- Existing databases already stamped at an older head (e.g. `004_*` / `005_*`)
+  keep working: `upgrade head` applies only newer revisions. The baseline is
+  an ancestor in the graph and is not re-run for already-stamped databases.
 - Back up the database before upgrading. With the default Postgres setup:
   - Backup: `docker exec <db-container> pg_dump -U vetclinic vetclinic > backup.sql`
   - Restore: `docker exec -i <db-container> psql -U vetclinic vetclinic < backup.sql`

@@ -81,7 +81,9 @@ def health(db: Session = Depends(get_db)):
     return {"status": "ok"}
 
 
-Base.metadata.create_all(bind=engine)
+# Schema is owned exclusively by Alembic (see alembic/versions/).
+# Do not call Base.metadata.create_all here — greenfield DBs are built by
+# ``alembic upgrade head`` (also invoked from on_startup).
 
 
 # ── Seed ──────────────────────────────────────────────────────────────────────
@@ -224,12 +226,15 @@ _MIGRATION_LOCK_KEY = 927341001
 
 def run_alembic_migrations() -> None:
     """
-    Apply versioned Alembic migrations — the only schema-change path.
+    Apply versioned Alembic migrations — the only schema ownership path.
+
+    Greenfield databases are created entirely by revisions (starting at
+    ``000_schema_baseline``). There is no SQLAlchemy ``create_all`` fallback.
 
     Held under a Postgres advisory lock so that multiple app instances
     starting concurrently (rolling deploy, multiple workers/replicas) don't
-    race the same DDL: the second instance blocks here until the first
-    finishes instead of both running `command.upgrade` at once.
+    race the same upgrade invocation: the second instance blocks here until
+    the first finishes instead of both running ``command.upgrade`` at once.
     """
     from pathlib import Path
     from alembic import command

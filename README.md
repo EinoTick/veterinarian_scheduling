@@ -47,4 +47,6 @@ cd ..\frontend
 npm install
 ```
 
-The database schema and seed data are created automatically on first backend startup.
+The database schema is applied automatically on backend startup via Alembic
+(`alembic upgrade head`). Demo seed data is loaded when `ENVIRONMENT` is not
+`production`.

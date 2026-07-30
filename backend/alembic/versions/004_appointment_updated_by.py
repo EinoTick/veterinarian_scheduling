@@ -27,4 +27,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE appointments DROP COLUMN IF EXISTS updated_by_user_id")
+    # Column is also created by 000_schema_baseline for greenfield DBs.
+    # Do not drop on downgrade — that would remove baseline-owned schema
+    # from databases that entered the chain via 000.
+    pass

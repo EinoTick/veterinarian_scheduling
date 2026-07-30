@@ -1,7 +1,7 @@
 """Add allocation/appointment indexes and clinic.timezone.
 
 Revision ID: 001_indexes_tz
-Revises:
+Revises: 000_schema_baseline
 Create Date: 2026-07-29
 """
 from typing import Sequence, Union
@@ -9,7 +9,7 @@ from typing import Sequence, Union
 from alembic import op
 
 revision: str = "001_indexes_tz"
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = "000_schema_baseline"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -40,8 +40,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS ix_appointments_clinic_start")
-    op.execute("DROP INDEX IF EXISTS ix_alloc_appointment_id")
-    op.execute("DROP INDEX IF EXISTS ix_alloc_resource_start_end")
-    op.execute("DROP INDEX IF EXISTS ix_alloc_user_start_end")
-    # Keep timezone column on downgrade — dropping it could destroy operator config.
+    # Indexes are owned by 000_schema_baseline (and re-asserted here for
+    # legacy DBs). Do not drop them on downgrade — that would leave a DB
+    # stamped at 000 without its baseline schedule indexes.
+    # Keep timezone column — dropping it could destroy operator config.
+    pass

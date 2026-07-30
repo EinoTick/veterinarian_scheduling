@@ -30,13 +30,32 @@ def upgrade() -> None:
         "ON clients (clinic_id, name) WHERE email IS NULL"
     )
 
+    # Idempotent CHECKs — safe if already applied or present from a repaired DB.
     op.execute(
-        "ALTER TABLE appointments ADD CONSTRAINT chk_appointments_end_after_start "
-        "CHECK (end_time > start_time)"
+        """
+        DO $$ BEGIN
+            ALTER TABLE appointments
+                ADD CONSTRAINT chk_appointments_end_after_start
+                CHECK (end_time > start_time);
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$
+        """
     )
     op.execute(
-        "ALTER TABLE appointment_allocations ADD CONSTRAINT chk_alloc_end_after_start "
-        "CHECK (start_time IS NULL OR end_time IS NULL OR end_time > start_time)"
+        """
+        DO $$ BEGIN
+            ALTER TABLE appointment_allocations
+                ADD CONSTRAINT chk_alloc_end_after_start
+                CHECK (
+                    start_time IS NULL
+                    OR end_time IS NULL
+                    OR end_time > start_time
+                );
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$
+        """
     )
 
     op.execute("DROP INDEX IF EXISTS uq_roles_global_name")
