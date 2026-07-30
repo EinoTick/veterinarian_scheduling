@@ -72,18 +72,22 @@ export default function ChangePasswordPage() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1">
-              <Label>Current Password</Label>
+              <Label htmlFor="current-password">Current Password</Label>
               <Input
+                id="current-password"
                 type="password"
+                autoComplete="current-password"
                 value={form.current_password}
                 onChange={(e) => setForm((f) => ({ ...f, current_password: e.target.value }))}
                 required
               />
             </div>
             <div className="space-y-1">
-              <Label>New Password</Label>
+              <Label htmlFor="new-password">New Password</Label>
               <Input
+                id="new-password"
                 type="password"
+                autoComplete="new-password"
                 value={form.new_password}
                 onChange={(e) => setForm((f) => ({ ...f, new_password: e.target.value }))}
                 required
@@ -92,17 +96,19 @@ export default function ChangePasswordPage() {
               <p className="text-xs text-muted-foreground">{PASSWORD_HINT}</p>
             </div>
             <div className="space-y-1">
-              <Label>Confirm New Password</Label>
+              <Label htmlFor="confirm-password">Confirm New Password</Label>
               <Input
+                id="confirm-password"
                 type="password"
+                autoComplete="new-password"
                 value={form.confirm_password}
                 onChange={(e) => setForm((f) => ({ ...f, confirm_password: e.target.value }))}
                 required
               />
             </div>
 
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            {success && <p className="text-sm text-green-600">Password updated successfully.</p>}
+            {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+            {success && <p className="text-sm text-green-600" role="status">Password updated successfully.</p>}
 
             <Button type="submit" disabled={submitting}>
               {submitting ? "Updating…" : "Update Password"}

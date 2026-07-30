@@ -399,6 +399,9 @@ class SoftStopResponse(BaseModel):
 # ── Booking ───────────────────────────────────────────────────────────────────
 
 APPOINTMENT_STATUSES = ("scheduled", "completed", "cancelled", "no_show")
+# Only actively scheduled appointments block new allocations.
+# completed / no_show free the slot for rebooking; cancelled never blocked.
+DOUBLE_BOOKING_STATUSES = ("scheduled",)
 
 
 class AllocationIn(BaseModel):
@@ -547,6 +550,56 @@ class OverrideLogListOut(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class PageMeta(BaseModel):
+    """Shared list envelope for catalog endpoints."""
+    total: int
+    limit: int
+    offset: int
+
+
+class ResourceListOut(PageMeta):
+    items: List[ResourceOut]
+
+
+class ServiceListOut(PageMeta):
+    items: List[ServiceOut]
+
+
+class RoleListOut(PageMeta):
+    items: List[RoleOut]
+
+
+class ClientListOut(PageMeta):
+    items: List[ClientOut]
+
+
+class RuleListOut(PageMeta):
+    items: List[RuleOut]
+
+
+class UserListOut(PageMeta):
+    items: List[UserOut]
+
+
+class ClinicListOut(PageMeta):
+    items: List[ClinicOut]
+
+
+class ClientExportOut(BaseModel):
+    exported_at: datetime
+    client: ClientOut
+    patients: List[PatientOut]
+    appointments: List[AppointmentOut]
+    override_logs: List[OverrideLogOut]
+    appointments_truncated: bool = False
+
+
+class ClientEraseOut(BaseModel):
+    client_id: int
+    erased: bool
+    message: str
 
 
 # ── Schedule ──────────────────────────────────────────────────────────────────

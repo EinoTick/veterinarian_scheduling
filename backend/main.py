@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import text
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from auth import (
     ACCESS_COOKIE,
@@ -41,15 +41,21 @@ from models import (
 )
 from schemas import (
     APPOINTMENT_STATUSES, AppointmentCreate, AppointmentListOut, AppointmentOut, AppointmentUpdate,
-    AppointmentValidateOut, AllocationOut, AuthSessionOut, ClinicCreate, ClinicOut, ClinicUpdate,
-    OverrideLogListOut, OverrideLogOut, PasswordChange, ResourceOut,
-    RoleOut, RuleCreate, RuleOut, RuleUpdate, ScheduleEventOut, ServiceOut, SoftStopResponse,
-    UserCreate, UserOut, ViolationDetail,
+    AppointmentValidateOut, AllocationOut, AuthSessionOut, ClinicCreate, ClinicListOut, ClinicOut, ClinicUpdate,
+    DOUBLE_BOOKING_STATUSES, OverrideLogListOut, OverrideLogOut, PasswordChange, ResourceOut,
+    RoleOut, RuleCreate, RuleListOut, RuleOut, RuleUpdate, ScheduleEventOut, ServiceOut, SoftStopResponse,
+    UserCreate, UserListOut, UserOut, ViolationDetail,
 )
 from catalog_routes import router as catalog_router
-from errors import http_internal_error, log_event
+from errors import http_internal_error, log_event, register_exception_handlers
 from logging_config import setup_logging
 from timeutil import as_utc_iso, to_utc_naive, utc_now
+from appointment_serialize import (
+    appointment_out as _appointment_out,
+    load_appointment as _load_appointment,
+    override_log_out as _override_log_out,
+)
+from catalog_paging import CATALOG_LIMIT_DEFAULT, CATALOG_LIMIT_MAX
 
 app = FastAPI(
     title="VetClinic Scheduler",
@@ -57,6 +63,8 @@ app = FastAPI(
     redoc_url=None if IS_PRODUCTION else "/redoc",
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
+
+register_exception_handlers(app)
 
 _cors_origins = [
     o.strip()
@@ -77,11 +85,27 @@ app.add_middleware(
 app.include_router(catalog_router)
 
 
+@app.get("/health/live")
+def health_live():
+    """Liveness — process is up (no dependency checks)."""
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def health_ready(db: Session = Depends(get_db)):
+    """Readiness — database is reachable."""
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        log_event("health_ready_failed", level=40, msg=str(exc))
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+    return {"status": "ok"}
+
+
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
-    """Liveness/readiness probe — no auth, cheap DB round-trip."""
-    db.execute(text("SELECT 1"))
-    return {"status": "ok"}
+    """Backward-compatible alias for readiness."""
+    return health_ready(db)
 
 
 # Schema is owned exclusively by Alembic (see alembic/versions/).
@@ -500,20 +524,36 @@ def change_password(
 
 # ── User management (CLINIC_ADMIN+) ──────────────────────────────────────────
 
-@app.get("/api/users", response_model=List[UserOut])
+_CATALOG_LIMIT_DEFAULT = CATALOG_LIMIT_DEFAULT
+_CATALOG_LIMIT_MAX = CATALOG_LIMIT_MAX
+
+
+def _paginate(query, *, limit: int, offset: int):
+    total = query.count()
+    items = query.offset(offset).limit(limit).all()
+    return items, total
+
+
+@app.get("/api/users", response_model=UserListOut)
 def list_users(
     include_inactive: bool = Query(False),
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(require_clinic_admin),
     db: Session = Depends(get_db),
 ):
     q = db.query(User)
     if not include_inactive:
         q = q.filter(User.is_active == True)
-    return clinic_filter(q, User, current_user).all()
+    q = clinic_filter(q, User, current_user).order_by(User.name)
+    items, total = _paginate(q, limit=limit, offset=offset)
+    return UserListOut(items=items, total=total, limit=limit, offset=offset)
 
 
-@app.get("/api/staff", response_model=List[UserOut])
+@app.get("/api/staff", response_model=UserListOut)
 def list_staff(
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -522,10 +562,11 @@ def list_staff(
     Available to any authenticated user (unlike /api/users which is admin-only).
     """
     q = db.query(User).filter(User.is_active == True, User.system_role != "SYSTEM_ADMIN")
-    if current_user.system_role == "SYSTEM_ADMIN":
-        # System admins see everyone except other system admins unless filtered by clinic in UI
-        return q.order_by(User.name).all()
-    return q.filter(User.clinic_id == current_user.clinic_id).order_by(User.name).all()
+    if current_user.system_role != "SYSTEM_ADMIN":
+        q = q.filter(User.clinic_id == current_user.clinic_id)
+    q = q.order_by(User.name)
+    items, total = _paginate(q, limit=limit, offset=offset)
+    return UserListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @app.post("/api/users", response_model=UserOut, status_code=201)
@@ -580,21 +621,21 @@ def create_user(
 
 # ── Reference data (auth-protected, clinic-scoped) ────────────────────────────
 
-@app.get("/api/clinics", response_model=List[ClinicOut])
+@app.get("/api/clinics", response_model=ClinicListOut)
 def list_clinics(
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     # SYSTEM_ADMIN operates across clinics; everyone else only ever needs
     # (and should only ever see) their own clinic's record.
     if current_user.system_role == "SYSTEM_ADMIN":
-        return db.query(Clinic).order_by(Clinic.name).all()
-    return (
-        db.query(Clinic)
-        .filter(Clinic.id == current_user.clinic_id)
-        .order_by(Clinic.name)
-        .all()
-    )
+        q = db.query(Clinic).order_by(Clinic.name)
+    else:
+        q = db.query(Clinic).filter(Clinic.id == current_user.clinic_id).order_by(Clinic.name)
+    items, total = _paginate(q, limit=limit, offset=offset)
+    return ClinicListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @app.post("/api/clinics", response_model=ClinicOut, status_code=201)
@@ -709,16 +750,20 @@ def list_override_logs(
     )
 
 
-@app.get("/api/rules", response_model=List[RuleOut])
+@app.get("/api/rules", response_model=RuleListOut)
 def list_rules(
     include_inactive: bool = Query(False),
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     q = clinic_filter(db.query(Rule), Rule, current_user)
     if not include_inactive:
         q = q.filter(Rule.is_active == True)
-    return q.all()
+    q = q.order_by(Rule.id)
+    items, total = _paginate(q, limit=limit, offset=offset)
+    return RuleListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @app.post("/api/rules", response_model=RuleOut, status_code=201)
@@ -1193,7 +1238,7 @@ def _check_double_booking(allocations_in, appt_start, service_duration, db, excl
                 AppointmentAllocation.start_time.isnot(None),
                 AppointmentAllocation.start_time < alloc_end,
                 AppointmentAllocation.end_time > alloc_start,
-                Appointment.status.in_(["scheduled", "completed", "no_show"]),
+                Appointment.status.in_(DOUBLE_BOOKING_STATUSES),
             )
         )
         if exclude_appointment_id is not None:
@@ -1502,86 +1547,6 @@ def _resolve_client_patient(payload, clinic_id: int, current_user: User, db: Ses
     return (client.id, patient.id, client.name, patient.name)
 
 
-def _allocation_out(alloc: AppointmentAllocation, appt_start: datetime) -> AllocationOut:
-    offset = 0
-    duration = None
-    if alloc.start_time is not None and appt_start is not None:
-        offset = max(0, int((alloc.start_time - appt_start).total_seconds() // 60))
-    if alloc.start_time is not None and alloc.end_time is not None:
-        duration = max(1, int((alloc.end_time - alloc.start_time).total_seconds() // 60))
-    return AllocationOut(
-        id=alloc.id,
-        user_id=alloc.user_id,
-        resource_id=alloc.resource_id,
-        presence_type=alloc.presence_type,
-        start_time=alloc.start_time,
-        end_time=alloc.end_time,
-        start_offset_minutes=offset,
-        duration_minutes=duration,
-    )
-
-
-def _override_log_out(log: OverrideLog) -> OverrideLogOut:
-    appt = log.appointment
-    authorizer = log.overridden_by_user
-    rule = log.rule
-    return OverrideLogOut(
-        id=log.id,
-        appointment_id=log.appointment_id,
-        clinic_id=appt.clinic_id if appt else None,
-        rule_id=log.rule_id,
-        override_type=log.override_type,
-        notes=log.notes,
-        timestamp=log.timestamp,
-        overridden_by_user_id=log.overridden_by_user_id,
-        authorizer_name=authorizer.name if authorizer else None,
-        rule_description=rule.description if rule else None,
-        client_name=appt.client_name if appt else None,
-        patient_name=appt.patient_name if appt else None,
-        service_id=appt.service_id if appt else None,
-    )
-
-
-def _appointment_out(appt: Appointment) -> AppointmentOut:
-    # Avoid lazy N+1 on list endpoints that do not joinedload override_logs.
-    overrides = []
-    if "override_logs" in appt.__dict__:
-        overrides = [_override_log_out(o) for o in (appt.override_logs or [])]
-    return AppointmentOut(
-        id=appt.id,
-        clinic_id=appt.clinic_id,
-        service_id=appt.service_id,
-        client_id=appt.client_id,
-        patient_id=appt.patient_id,
-        start_time=appt.start_time,
-        end_time=appt.end_time,
-        client_name=appt.client_name,
-        patient_name=appt.patient_name,
-        status=appt.status,
-        allocations=[
-            _allocation_out(a, appt.start_time) for a in (appt.allocations or [])
-        ],
-        overrides=overrides,
-        created_at=appt.created_at,
-        updated_at=appt.updated_at,
-        created_by_user_id=appt.created_by_user_id,
-        updated_by_user_id=appt.updated_by_user_id,
-    )
-
-
-def _load_appointment(db: Session, appointment_id: int) -> Optional[Appointment]:
-    return (
-        db.query(Appointment)
-        .options(
-            joinedload(Appointment.allocations),
-            joinedload(Appointment.override_logs).joinedload(OverrideLog.overridden_by_user),
-            joinedload(Appointment.override_logs).joinedload(OverrideLog.rule),
-        )
-        .filter(Appointment.id == appointment_id)
-        .first()
-    )
-
-
 @app.get("/api/appointments", response_model=AppointmentListOut)
 def list_appointments(
     status: Optional[str] = Query(None),
@@ -1624,7 +1589,7 @@ def list_appointments(
     total = q.count()
     items = (
         q.order_by(Appointment.start_time.desc())
-        .options(joinedload(Appointment.allocations))
+        .options(selectinload(Appointment.allocations))
         .offset(offset)
         .limit(limit)
         .all()

@@ -11,14 +11,18 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { Plus } from "lucide-react";
-import { readErrorMessage } from "@/lib/http";
+import { unwrapList, readErrorMessage, listCountLabel } from "@/lib/http";
 import { can } from "@/lib/rbac";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
+import { LIST_FETCH_LIMIT } from "@/lib/constants";
 
 export default function RolesPage() {
   const { apiFetch, user } = useAuth();
   const { invalidate } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
   const [roles, setRoles] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [includeInactive, setIncludeInactive] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [open, setOpen] = useState(false);
@@ -27,13 +31,18 @@ export default function RolesPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch(`/api/roles?include_inactive=${includeInactive}`);
+      const res = await apiFetch(
+        `/api/roles?include_inactive=${includeInactive}&limit=${LIST_FETCH_LIMIT}`
+      );
       if (!res.ok) {
         setLoadError(await readErrorMessage(res, "Failed to load roles."));
         return;
       }
       setLoadError(null);
-      setRoles(await res.json());
+      const body = await res.json();
+      const { items, total } = unwrapList(body);
+      setRoles(items);
+      setListTotal(total);
     } catch {
       setLoadError("Failed to load roles.");
     }
@@ -64,7 +73,14 @@ export default function RolesPage() {
   }
 
   async function toggleActive(role) {
-    if (role.is_active && !window.confirm(`Deactivate role "${role.name}"?`)) return;
+    if (role.is_active) {
+      if (!(await confirm({
+        title: "Deactivate role?",
+        description: `Deactivate role "${role.name}"?`,
+        destructive: true,
+        confirmLabel: "Deactivate",
+      }))) return;
+    }
     setLoadError(null);
     const res = await apiFetch(`/api/roles/${role.id}`, {
       method: "PATCH",
@@ -101,7 +117,15 @@ export default function RolesPage() {
       </div>
 
       <Card>
-        <CardHeader><CardTitle>Roles</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle>Roles</CardTitle>
+          {!loadError && roles.length > 0 && (
+            <p className="text-sm font-normal text-muted-foreground">
+              {listCountLabel(roles.length, listTotal)}
+              {listTotal > roles.length ? " — list truncated at fetch limit." : ""}
+            </p>
+          )}
+        </CardHeader>
         <CardContent>
           {loadError ? (
             <p className="text-sm text-destructive">{loadError}</p>
@@ -188,6 +212,8 @@ export default function RolesPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog />
     </div>
   );
 }

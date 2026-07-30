@@ -14,13 +14,17 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Plus } from "lucide-react";
-import { readErrorMessage } from "@/lib/http";
+import { unwrapList, readErrorMessage, listCountLabel } from "@/lib/http";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
+import { LIST_FETCH_LIMIT } from "@/lib/constants";
 
 export default function ServicesPage() {
   const { apiFetch, user } = useAuth();
   const { clinics, ensure, invalidate } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
   const [items, setItems] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [includeInactive, setIncludeInactive] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", default_duration_minutes: "30", clinic_id: "" });
@@ -29,13 +33,18 @@ export default function ServicesPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch(`/api/services?include_inactive=${includeInactive}`);
+      const res = await apiFetch(
+        `/api/services?include_inactive=${includeInactive}&limit=${LIST_FETCH_LIMIT}`
+      );
       if (!res.ok) {
         setLoadError(await readErrorMessage(res, "Failed to load services."));
         return;
       }
       setLoadError(null);
-      setItems(await res.json());
+      const body = await res.json();
+      const { items: list, total } = unwrapList(body);
+      setItems(list);
+      setListTotal(total);
       if (isSystemAdmin) {
         try {
           await ensure(["clinics"]);
@@ -74,7 +83,14 @@ export default function ServicesPage() {
   }
 
   async function toggleActive(s) {
-    if (s.is_active && !window.confirm(`Deactivate "${s.name}"?`)) return;
+    if (s.is_active) {
+      if (!(await confirm({
+        title: "Deactivate service?",
+        description: `Deactivate "${s.name}"?`,
+        destructive: true,
+        confirmLabel: "Deactivate",
+      }))) return;
+    }
     setLoadError(null);
     const res = await apiFetch(`/api/services/${s.id}`, {
       method: "PATCH",
@@ -105,7 +121,15 @@ export default function ServicesPage() {
       </div>
 
       <Card>
-        <CardHeader><CardTitle>Service catalog</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle>Service catalog</CardTitle>
+          {!loadError && items.length > 0 && (
+            <p className="text-sm font-normal text-muted-foreground">
+              {listCountLabel(items.length, listTotal)}
+              {listTotal > items.length ? " — list truncated at fetch limit." : ""}
+            </p>
+          )}
+        </CardHeader>
         <CardContent>
           {loadError ? (
             <p className="text-sm text-destructive">{loadError}</p>
@@ -181,6 +205,8 @@ export default function ServicesPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog />
     </div>
   );
 }

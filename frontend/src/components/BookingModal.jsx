@@ -23,6 +23,7 @@ import {
   normalizeClinicTz,
 } from "@/lib/datetime";
 import { PRESENCE_TYPE_OPTIONS as PRESENCE_TYPES } from "@/lib/constants";
+import { detailMessage, errorCode, readJson } from "@/lib/http";
 
 const EMPTY_FORM = {
   clinic_id: "",
@@ -106,6 +107,7 @@ function AllocationRow({
         size="icon"
         onClick={onRemove}
         disabled={disabled}
+        aria-label="Remove allocation"
         className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
       >
         <X className="h-3 w-3" />
@@ -477,22 +479,26 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
       return;
     }
 
-    const body = await res.json();
-    const detail = body.detail;
+    const body = await readJson(res);
+    const code = errorCode(body);
+    const details = body?.error?.details || body?.detail;
 
-    if (res.status === 422 && detail?.type === "soft_stop") {
-      setSoftViolations(detail.violations);
+    if (res.status === 422 && code === "soft_stop") {
+      setSoftViolations(details?.violations || []);
       return;
     }
-    if (res.status === 400 && detail?.type === "double_booking") {
-      setDoubleBookingConflicts(detail.conflicts);
+    if (res.status === 400 && code === "double_booking") {
+      setDoubleBookingConflicts(details?.conflicts || []);
       return;
     }
-    if (res.status === 400 && detail?.type === "hard_stop") {
-      setError({ type: "hard_stop", violations: detail.violations });
+    if (res.status === 400 && code === "hard_stop") {
+      setError({ type: "hard_stop", violations: details?.violations || [] });
       return;
     }
-    setError({ type: "generic", message: typeof detail === "string" ? detail : JSON.stringify(detail) });
+    setError({
+      type: "generic",
+      message: detailMessage(body, "Booking failed."),
+    });
   }
 
   const hasSoftStop = softViolations && softViolations.length > 0;
@@ -532,7 +538,7 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
         <div className="space-y-4 py-2">
           {isSystemAdmin && (
             <div className="space-y-1">
-              <Label>Clinic</Label>
+              <Label htmlFor="book-clinic">Clinic</Label>
               <Select
                 value={form.clinic_id}
                 onValueChange={(v) =>
@@ -548,7 +554,7 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
                 }
                 disabled={formLocked || isEdit}
               >
-                <SelectTrigger><SelectValue placeholder="Select clinic…" /></SelectTrigger>
+                <SelectTrigger id="book-clinic"><SelectValue placeholder="Select clinic…" /></SelectTrigger>
                 <SelectContent>
                   {clinics.map((c) => (
                     <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
@@ -559,13 +565,13 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
           )}
 
           <div className="space-y-1">
-            <Label>Service</Label>
+            <Label htmlFor="book-service">Service</Label>
             <Select
               value={form.service_id}
               onValueChange={(v) => setForm((f) => ({ ...f, service_id: v }))}
               disabled={formLocked}
             >
-              <SelectTrigger><SelectValue placeholder="Select service…" /></SelectTrigger>
+              <SelectTrigger id="book-service"><SelectValue placeholder="Select service…" /></SelectTrigger>
               <SelectContent>
                 {services.map((s) => (
                   <SelectItem key={s.id} value={String(s.id)}>
@@ -597,8 +603,9 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
           })()}
 
           <div className="space-y-1">
-            <Label>Start Time</Label>
+            <Label htmlFor="book-start">Start Time</Label>
             <Input
+              id="book-start"
               type="datetime-local"
               value={form.start_time}
               min={minStart}
@@ -611,7 +618,7 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label>Client</Label>
+              <Label htmlFor="book-client">Client</Label>
               {clients.length === 0 ? (
                 <p className="text-xs text-muted-foreground rounded-md border border-dashed p-2">
                   No clients yet — add one under Clients.
@@ -624,7 +631,7 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
                   }
                   disabled={formLocked || (isSystemAdmin && !form.clinic_id)}
                 >
-                  <SelectTrigger><SelectValue placeholder="Select client…" /></SelectTrigger>
+                  <SelectTrigger id="book-client"><SelectValue placeholder="Select client…" /></SelectTrigger>
                   <SelectContent>
                     {clients.map((c) => (
                       <SelectItem key={c.id} value={String(c.id)}>
@@ -636,13 +643,13 @@ export default function BookingModal({ open, onClose, onBooked, appointment = nu
               )}
             </div>
             <div className="space-y-1">
-              <Label>Patient</Label>
+              <Label htmlFor="book-patient">Patient</Label>
               <Select
                 value={form.patient_id}
                 onValueChange={(v) => setForm((f) => ({ ...f, patient_id: v }))}
                 disabled={formLocked || !form.client_id}
               >
-                <SelectTrigger><SelectValue placeholder="Select patient…" /></SelectTrigger>
+                <SelectTrigger id="book-patient"><SelectValue placeholder="Select patient…" /></SelectTrigger>
                 <SelectContent>
                   {patients.map((p) => (
                     <SelectItem key={p.id} value={String(p.id)}>

@@ -14,13 +14,19 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Plus } from "lucide-react";
-import { readErrorMessage } from "@/lib/http";
+import { unwrapList, readErrorMessage, listCountLabel } from "@/lib/http";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
+import { LIST_FETCH_LIMIT } from "@/lib/constants";
 
 export default function ClientsPage() {
   const { apiFetch, user } = useAuth();
   const { invalidate } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
+  const canPrivacyActions =
+    user?.system_role === "CLINIC_ADMIN" || user?.system_role === "SYSTEM_ADMIN";
   const [clients, setClients] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [clinics, setClinics] = useState([]);
   const [search, setSearch] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
@@ -37,7 +43,8 @@ export default function ClientsPage() {
     const params = new URLSearchParams();
     if (search) params.set("q", search);
     if (includeInactive) params.set("include_inactive", "true");
-    const qs = params.toString() ? `?${params}` : "";
+    params.set("limit", String(LIST_FETCH_LIMIT));
+    const qs = `?${params}`;
     try {
       const res = await apiFetch(`/api/clients${qs}`);
       if (!res.ok) {
@@ -45,14 +52,19 @@ export default function ClientsPage() {
         return;
       }
       setLoadError(null);
-      setClients(await res.json());
+      const body = await res.json();
+      const { items, total } = unwrapList(body);
+      setClients(items);
+      setListTotal(total);
       if (isSystemAdmin) {
-        const cl = await apiFetch("/api/clinics");
+        const cl = await apiFetch(`/api/clinics?limit=${LIST_FETCH_LIMIT}`);
         if (!cl.ok) {
           setLoadError(await readErrorMessage(cl, "Failed to load clinics."));
           return;
         }
-        setClinics(await cl.json());
+        const clinicsBody = await cl.json();
+        const { items: clinicItems } = unwrapList(clinicsBody);
+        setClinics(clinicItems);
       }
     } catch {
       setLoadError("Failed to load clients.");
@@ -116,8 +128,13 @@ export default function ClientsPage() {
   }
 
   async function toggleClientActive(client) {
-    if (client.is_active && !window.confirm(`Deactivate client "${client.name}"? They cannot be selected for new bookings.`)) {
-      return;
+    if (client.is_active) {
+      if (!(await confirm({
+        title: "Deactivate client?",
+        description: `Deactivate client "${client.name}"? They cannot be selected for new bookings.`,
+        destructive: true,
+        confirmLabel: "Deactivate",
+      }))) return;
     }
     setBusyKey(`c-${client.id}`);
     setLoadError(null);
@@ -138,8 +155,13 @@ export default function ClientsPage() {
   }
 
   async function togglePatientActive(patient, clientName) {
-    if (patient.is_active && !window.confirm(`Deactivate patient "${patient.name}" (${clientName})?`)) {
-      return;
+    if (patient.is_active) {
+      if (!(await confirm({
+        title: "Deactivate patient?",
+        description: `Deactivate patient "${patient.name}" (${clientName})?`,
+        destructive: true,
+        confirmLabel: "Deactivate",
+      }))) return;
     }
     setBusyKey(`p-${patient.id}`);
     setLoadError(null);
@@ -150,6 +172,56 @@ export default function ClientsPage() {
       });
       if (!res.ok) {
         setLoadError(await readErrorMessage(res, "Failed to update patient."));
+        return;
+      }
+      invalidate(["clients"]);
+      await load();
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function exportClient(client) {
+    setBusyKey(`export-${client.id}`);
+    setLoadError(null);
+    try {
+      const res = await apiFetch(`/api/clients/${client.id}/export`);
+      if (!res.ok) {
+        setLoadError(await readErrorMessage(res, "Failed to export client."));
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `client-${client.id}-export.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setLoadError("Failed to export client.");
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function eraseClient(client) {
+    if (!(await confirm({
+      title: "Erase client data?",
+      description:
+        `This will anonymize personal data for "${client.name}" and related patients, ` +
+        "redact appointment names and override notes, and keep stable IDs for scheduling history. " +
+        "This action cannot be undone.",
+      destructive: true,
+      confirmLabel: "Erase data",
+    }))) return;
+    setBusyKey(`erase-${client.id}`);
+    setLoadError(null);
+    try {
+      const res = await apiFetch(`/api/clients/${client.id}/erase`, { method: "POST" });
+      if (!res.ok) {
+        setLoadError(await readErrorMessage(res, "Failed to erase client data."));
         return;
       }
       invalidate(["clients"]);
@@ -191,6 +263,12 @@ export default function ClientsPage() {
       />
 
       {loadError && <p className="text-sm text-destructive">{loadError}</p>}
+      {!loadError && clients.length > 0 && (
+        <p className="text-sm text-muted-foreground">
+          {listCountLabel(clients.length, listTotal)}
+          {listTotal > clients.length ? " — narrow your search to find others." : ""}
+        </p>
+      )}
 
       <div className="space-y-4">
         {clients.map((c) => {
@@ -210,7 +288,27 @@ export default function ClientsPage() {
                     {isSystemAdmin && c.clinic_id != null ? ` · Clinic #${c.clinic_id}` : ""}
                   </p>
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+                  {canPrivacyActions && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busyKey === `export-${c.id}`}
+                        onClick={() => exportClient(c)}
+                      >
+                        Export
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        disabled={busyKey === `erase-${c.id}`}
+                        onClick={() => eraseClient(c)}
+                      >
+                        Erase data
+                      </Button>
+                    </>
+                  )}
                   <Button
                     size="sm"
                     variant="outline"
@@ -293,16 +391,30 @@ export default function ClientsPage() {
               </div>
             )}
             <div className="space-y-1">
-              <Label>Name</Label>
-              <Input value={clientForm.name} onChange={(e) => setClientForm((f) => ({ ...f, name: e.target.value }))} required />
+              <Label htmlFor="client-name">Name</Label>
+              <Input
+                id="client-name"
+                value={clientForm.name}
+                onChange={(e) => setClientForm((f) => ({ ...f, name: e.target.value }))}
+                required
+              />
             </div>
             <div className="space-y-1">
-              <Label>Email</Label>
-              <Input type="email" value={clientForm.email} onChange={(e) => setClientForm((f) => ({ ...f, email: e.target.value }))} />
+              <Label htmlFor="client-email">Email</Label>
+              <Input
+                id="client-email"
+                type="email"
+                value={clientForm.email}
+                onChange={(e) => setClientForm((f) => ({ ...f, email: e.target.value }))}
+              />
             </div>
             <div className="space-y-1">
-              <Label>Phone</Label>
-              <Input value={clientForm.phone} onChange={(e) => setClientForm((f) => ({ ...f, phone: e.target.value }))} />
+              <Label htmlFor="client-phone">Phone</Label>
+              <Input
+                id="client-phone"
+                value={clientForm.phone}
+                onChange={(e) => setClientForm((f) => ({ ...f, phone: e.target.value }))}
+              />
             </div>
             {formError && <p className="text-sm text-destructive">{formError}</p>}
             <DialogFooter>
@@ -320,17 +432,31 @@ export default function ClientsPage() {
           </DialogHeader>
           <form onSubmit={createPatient} className="space-y-3">
             <div className="space-y-1">
-              <Label>Name</Label>
-              <Input value={patientForm.name} onChange={(e) => setPatientForm((f) => ({ ...f, name: e.target.value }))} required />
+              <Label htmlFor="patient-name">Name</Label>
+              <Input
+                id="patient-name"
+                value={patientForm.name}
+                onChange={(e) => setPatientForm((f) => ({ ...f, name: e.target.value }))}
+                required
+              />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label>Species</Label>
-                <Input value={patientForm.species} onChange={(e) => setPatientForm((f) => ({ ...f, species: e.target.value }))} placeholder="Dog, Cat…" />
+                <Label htmlFor="patient-species">Species</Label>
+                <Input
+                  id="patient-species"
+                  value={patientForm.species}
+                  onChange={(e) => setPatientForm((f) => ({ ...f, species: e.target.value }))}
+                  placeholder="Dog, Cat…"
+                />
               </div>
               <div className="space-y-1">
-                <Label>Breed</Label>
-                <Input value={patientForm.breed} onChange={(e) => setPatientForm((f) => ({ ...f, breed: e.target.value }))} />
+                <Label htmlFor="patient-breed">Breed</Label>
+                <Input
+                  id="patient-breed"
+                  value={patientForm.breed}
+                  onChange={(e) => setPatientForm((f) => ({ ...f, breed: e.target.value }))}
+                />
               </div>
             </div>
             {formError && <p className="text-sm text-destructive">{formError}</p>}
@@ -341,6 +467,8 @@ export default function ClientsPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog />
     </div>
   );
 }

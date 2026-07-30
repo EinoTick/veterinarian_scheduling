@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/context/AuthContext";
 import { useCatalog } from "@/context/CatalogContext";
 import { useClinicTimezone } from "@/hooks/useClinicTimezone";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import { readErrorMessage, readJson } from "@/lib/http";
 import { formatInClinic } from "@/lib/datetime";
 import { APPOINTMENT_STATUS_VARIANT as STATUS_VARIANT } from "@/lib/constants";
@@ -24,6 +25,7 @@ export default function AppointmentDetailDialog({
 }) {
   const { apiFetch } = useAuth();
   const { services, staff, resources, ensure } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const [appt, setAppt] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -68,8 +70,12 @@ export default function AppointmentDetailDialog({
   async function setStatus(status) {
     if (!appt) return;
     if (status === "cancelled") {
-      const ok = window.confirm("Cancel this appointment?");
-      if (!ok) return;
+      if (!(await confirm({
+        title: "Cancel appointment?",
+        description: "Cancel this appointment?",
+        destructive: true,
+        confirmLabel: "Cancel appointment",
+      }))) return;
     }
     setBusy(true);
     setError(null);
@@ -261,6 +267,8 @@ export default function AppointmentDetailDialog({
           onChanged?.(updated);
         }}
       />
+
+      <ConfirmDialog />
     </>
   );
 }

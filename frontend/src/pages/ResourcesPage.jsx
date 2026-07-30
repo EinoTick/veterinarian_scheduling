@@ -14,13 +14,17 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Plus } from "lucide-react";
-import { readErrorMessage } from "@/lib/http";
+import { unwrapList, readErrorMessage, listCountLabel } from "@/lib/http";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
+import { LIST_FETCH_LIMIT } from "@/lib/constants";
 
 export default function ResourcesPage() {
   const { apiFetch, user } = useAuth();
   const { clinics, ensure, invalidate } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
   const [items, setItems] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [includeInactive, setIncludeInactive] = useState(false);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", resource_type: "room", category: "", clinic_id: "" });
@@ -29,13 +33,18 @@ export default function ResourcesPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch(`/api/resources?include_inactive=${includeInactive}`);
+      const res = await apiFetch(
+        `/api/resources?include_inactive=${includeInactive}&limit=${LIST_FETCH_LIMIT}`
+      );
       if (!res.ok) {
         setLoadError(await readErrorMessage(res, "Failed to load resources."));
         return;
       }
       setLoadError(null);
-      setItems(await res.json());
+      const body = await res.json();
+      const { items: list, total } = unwrapList(body);
+      setItems(list);
+      setListTotal(total);
       if (isSystemAdmin) {
         try {
           await ensure(["clinics"]);
@@ -75,7 +84,14 @@ export default function ResourcesPage() {
   }
 
   async function toggleActive(r) {
-    if (r.is_active && !window.confirm(`Deactivate "${r.name}"?`)) return;
+    if (r.is_active) {
+      if (!(await confirm({
+        title: "Deactivate resource?",
+        description: `Deactivate "${r.name}"?`,
+        destructive: true,
+        confirmLabel: "Deactivate",
+      }))) return;
+    }
     setLoadError(null);
     const res = await apiFetch(`/api/resources/${r.id}`, {
       method: "PATCH",
@@ -106,7 +122,15 @@ export default function ResourcesPage() {
       </div>
 
       <Card>
-        <CardHeader><CardTitle>Inventory</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle>Inventory</CardTitle>
+          {!loadError && items.length > 0 && (
+            <p className="text-sm font-normal text-muted-foreground">
+              {listCountLabel(items.length, listTotal)}
+              {listTotal > items.length ? " — list truncated at fetch limit." : ""}
+            </p>
+          )}
+        </CardHeader>
         <CardContent>
           {loadError ? (
             <p className="text-sm text-destructive">{loadError}</p>
@@ -192,6 +216,8 @@ export default function ResourcesPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog />
     </div>
   );
 }

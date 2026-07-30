@@ -9,12 +9,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import CreateUserModal from "@/components/CreateUserModal";
 import UserScheduleDialog from "@/components/UserScheduleDialog";
 import { Plus } from "lucide-react";
-import { ROLE_BADGE_VARIANT as ROLE_BADGE } from "@/lib/constants";
+import { ROLE_BADGE_VARIANT as ROLE_BADGE, LIST_FETCH_LIMIT } from "@/lib/constants";
+import { unwrapList, readErrorMessage, listCountLabel } from "@/lib/http";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 
 export default function UsersPage() {
   const { apiFetch, user: currentUser } = useAuth();
   const { invalidate } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const [users, setUsers] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [loadError, setLoadError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [scheduleUser, setScheduleUser] = useState(null);
@@ -23,17 +27,22 @@ export default function UsersPage() {
   const loadUsers = useCallback(async () => {
     let res;
     try {
-      res = await apiFetch(`/api/users?include_inactive=${includeInactive}`);
+      res = await apiFetch(
+        `/api/users?include_inactive=${includeInactive}&limit=${LIST_FETCH_LIMIT}`
+      );
     } catch {
       setLoadError("Failed to load users.");
       return;
     }
     if (!res.ok) {
-      setLoadError("Failed to load users.");
+      setLoadError(await readErrorMessage(res, "Failed to load users."));
       return;
     }
     setLoadError(null);
-    setUsers(await res.json());
+    const body = await res.json();
+    const { items, total } = unwrapList(body);
+    setUsers(items);
+    setListTotal(total);
   }, [apiFetch, includeInactive]);
 
   useEffect(() => { loadUsers(); }, [loadUsers]);
@@ -44,16 +53,20 @@ export default function UsersPage() {
       setLoadError("You cannot deactivate your own account.");
       return;
     }
-    if (u.is_active && !window.confirm(`Deactivate ${u.name}? They will no longer be able to sign in.`)) {
-      return;
+    if (u.is_active) {
+      if (!(await confirm({
+        title: "Deactivate user?",
+        description: `Deactivate ${u.name}? They will no longer be able to sign in.`,
+        destructive: true,
+        confirmLabel: "Deactivate",
+      }))) return;
     }
     const res = await apiFetch(`/api/users/${u.id}`, {
       method: "PATCH",
       body: JSON.stringify({ is_active: !u.is_active }),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      setLoadError(typeof err.detail === "string" ? err.detail : "Failed to update user.");
+      setLoadError(await readErrorMessage(res, "Failed to update user."));
       return;
     }
     setLoadError(null);
@@ -90,6 +103,12 @@ export default function UsersPage() {
               <span className="ml-2 text-sm font-normal text-muted-foreground">(all clinics)</span>
             )}
           </CardTitle>
+          {!loadError && users.length > 0 && (
+            <p className="text-sm font-normal text-muted-foreground">
+              {listCountLabel(users.length, listTotal)}
+              {listTotal > users.length ? " — refine filters or raise the page limit." : ""}
+            </p>
+          )}
         </CardHeader>
         <CardContent>
           {loadError ? (
@@ -169,6 +188,8 @@ export default function UsersPage() {
         open={!!scheduleUser}
         onClose={() => setScheduleUser(null)}
       />
+
+      <ConfirmDialog />
     </div>
   );
 }

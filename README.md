@@ -56,6 +56,8 @@ The database schema is applied automatically on backend startup via Alembic
 For API + SPA images, HTTPS edge proxy, secrets file, and a DB that is **not**
 exposed on the host, see **[DEPLOY.md](./DEPLOY.md)**.
 
+Privacy / GDPR export & erase: **[PRIVACY.md](./PRIVACY.md)**.
+
 ```powershell
 copy .env.prod.example .env.prod
 # edit secrets in .env.prod

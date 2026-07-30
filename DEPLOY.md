@@ -112,14 +112,26 @@ leave demo passwords on an internet-facing host.
 
 ## Operations notes
 
-- **Backups:** `docker compose -f docker-compose.prod.yml exec db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"`
+- **Backups:** use `deploy/scripts/backup-db.sh` (or `.ps1`) against
+  `docker-compose.prod.yml`. Keep daily dumps **≥ 7 days**.
+- **Restore drill (quarterly):**
+  1. Take a fresh backup.
+  2. Restore onto a staging stack with `deploy/scripts/restore-db.sh` / `.ps1`.
+  3. Confirm `GET /health/ready`, admin login, bookings list, and row counts.
+  4. Record date/operator in your ops log.
 - **Logs:** `docker compose -f docker-compose.prod.yml logs -f api web`
-- **Health:** `https://<host>/health` (API DB ping) and container `web` `/healthz`
+- **Health:**
+  - `GET /health/live` — process up (Docker API HEALTHCHECK)
+  - `GET /health/ready` — DB reachable (load balancers / `https://<host>/health`)
+  - Edge `web` container still exposes `/healthz` (nginx only)
+- **Privacy:** see `PRIVACY.md` for export/erase and retention.
 - **Scaling:** set `RATE_LIMIT_BACKEND=redis` and `REDIS_URL` (add a Redis
   service on the internal network) before running multiple API replicas.
   Default `memory` backend is single-worker only.
 - Logout / password reset / user deactivate / role change bump
   `users.session_version` so access JWTs fail immediately, not only after TTL.
+- **Double-booking:** only `scheduled` appointments block a slot;
+  `completed` / `no_show` / `cancelled` do not.
 - **Dev compose** (`docker-compose.yml`) still publishes Postgres `:5432` for
   local uvicorn; never reuse that file as a public production deploy.
 
@@ -129,9 +141,12 @@ leave demo passwords on an internet-facing host.
 
 | Path | Role |
 |------|------|
-| `backend/Dockerfile` | API image |
+| `backend/Dockerfile` | API image (`/health/live` HEALTHCHECK) |
 | `frontend/Dockerfile` | SPA build + nginx edge |
-| `deploy/nginx/default.conf` | TLS, SPA, `/api` proxy |
+| `deploy/nginx/default.conf` | TLS, SPA, `/api` + health proxies |
 | `docker-compose.prod.yml` | Full stack |
 | `.env.prod.example` | Secrets template |
 | `deploy/scripts/gen-dev-certs.*` | Self-signed cert helper |
+| `deploy/scripts/backup-db.*` / `restore-db.*` | Backup & restore drill |
+| `.github/workflows/ci.yml` | Lint/build/import smoke |
+| `PRIVACY.md` | GDPR export/erase + retention |

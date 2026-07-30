@@ -12,14 +12,16 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Plus } from "lucide-react";
-import { readErrorMessage } from "@/lib/http";
+import { unwrapList, readErrorMessage, listCountLabel } from "@/lib/http";
 import { can, COMMON_TIMEZONES } from "@/lib/rbac";
+import { LIST_FETCH_LIMIT } from "@/lib/constants";
 
 export default function ClinicsPage() {
   const { apiFetch, user } = useAuth();
   const { invalidate } = useCatalog();
   const isSystemAdmin = user?.system_role === "SYSTEM_ADMIN";
   const [clinics, setClinics] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [loadError, setLoadError] = useState(null);
   const [saveError, setSaveError] = useState(null);
   const [busyId, setBusyId] = useState(null);
@@ -29,17 +31,19 @@ export default function ClinicsPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch("/api/clinics");
+      const res = await apiFetch(`/api/clinics?limit=${LIST_FETCH_LIMIT}`);
       if (!res.ok) {
         setLoadError(await readErrorMessage(res, "Failed to load clinics."));
         return;
       }
-      const data = await res.json();
+      const body = await res.json();
+      const { items, total } = unwrapList(body);
       setLoadError(null);
-      setClinics(data);
+      setClinics(items);
+      setListTotal(total);
       setDrafts(
         Object.fromEntries(
-          data.map((c) => [c.id, { name: c.name, timezone: c.timezone || "UTC" }])
+          items.map((c) => [c.id, { name: c.name, timezone: c.timezone || "UTC" }])
         )
       );
     } catch {
@@ -128,6 +132,12 @@ export default function ClinicsPage() {
 
       {loadError && <p className="text-sm text-destructive">{loadError}</p>}
       {saveError && <p className="text-sm text-destructive">{saveError}</p>}
+      {!loadError && clinics.length > 0 && (
+        <p className="text-sm text-muted-foreground">
+          {listCountLabel(clinics.length, listTotal)}
+          {listTotal > clinics.length ? " — list truncated at fetch limit." : ""}
+        </p>
+      )}
 
       <div className="space-y-4">
         {clinics.map((c) => {

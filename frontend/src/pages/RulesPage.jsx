@@ -8,13 +8,18 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import CreateRuleModal from "@/components/CreateRuleModal";
 import { Pencil, Plus, Power } from "lucide-react";
+import { unwrapList, readErrorMessage, listCountLabel } from "@/lib/http";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
+import { LIST_FETCH_LIMIT } from "@/lib/constants";
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export default function RulesPage() {
   const { apiFetch } = useAuth();
   const { services, roles, resources, ensure, invalidate } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const [rules, setRules] = useState([]);
+  const [listTotal, setListTotal] = useState(0);
   const [loadError, setLoadError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRule, setEditingRule] = useState(null);
@@ -27,13 +32,18 @@ export default function RulesPage() {
       } catch {
         /* catalog banner surfaces partial failures */
       }
-      const rulesRes = await apiFetch(`/api/rules?include_inactive=${includeInactive}`);
+      const rulesRes = await apiFetch(
+        `/api/rules?include_inactive=${includeInactive}&limit=${LIST_FETCH_LIMIT}`
+      );
       if (!rulesRes.ok) {
-        setLoadError("Failed to load rules.");
+        setLoadError(await readErrorMessage(rulesRes, "Failed to load rules."));
         return;
       }
       setLoadError(null);
-      setRules(await rulesRes.json());
+      const body = await rulesRes.json();
+      const { items, total } = unwrapList(body);
+      setRules(items);
+      setListTotal(total);
     } catch {
       setLoadError("Failed to load rules.");
     }
@@ -42,7 +52,12 @@ export default function RulesPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   async function deactivateRule(rule) {
-    if (!window.confirm(`Deactivate this rule?\n\n"${rule.description}"`)) return;
+    if (!(await confirm({
+      title: "Deactivate rule?",
+      description: `Deactivate this rule?\n\n"${rule.description}"`,
+      destructive: true,
+      confirmLabel: "Deactivate",
+    }))) return;
     const res = await apiFetch(`/api/rules/${rule.id}`, { method: "DELETE" });
     if (res.ok || res.status === 204) {
       invalidate(["rules"]);
@@ -121,6 +136,12 @@ export default function RulesPage() {
       <Card>
         <CardHeader>
           <CardTitle>Scheduling Rules</CardTitle>
+          {!loadError && rules.length > 0 && (
+            <p className="text-sm font-normal text-muted-foreground">
+              {listCountLabel(rules.length, listTotal)}
+              {listTotal > rules.length ? " — list truncated at fetch limit." : ""}
+            </p>
+          )}
         </CardHeader>
         <CardContent>
           {loadError ? (
@@ -196,6 +217,8 @@ export default function RulesPage() {
         onClose={() => { setModalOpen(false); setEditingRule(null); }}
         onSaved={loadData}
       />
+
+      <ConfirmDialog />
     </div>
   );
 }

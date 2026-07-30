@@ -8,19 +8,20 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { LIST_FETCH_LIMIT } from "@/lib/constants";
 
 const CatalogContext = createContext(null);
 
 const EMPTY = Object.freeze([]);
 
 const PATHS = {
-  services: "/api/services",
-  staff: "/api/staff",
-  resources: "/api/resources",
-  roles: "/api/roles",
-  rules: "/api/rules",
-  clinics: "/api/clinics",
-  clients: "/api/clients",
+  services: `/api/services?limit=${LIST_FETCH_LIMIT}`,
+  staff: `/api/staff?limit=${LIST_FETCH_LIMIT}`,
+  resources: `/api/resources?limit=${LIST_FETCH_LIMIT}`,
+  roles: `/api/roles?limit=${LIST_FETCH_LIMIT}`,
+  rules: `/api/rules?limit=${LIST_FETCH_LIMIT}`,
+  clinics: `/api/clinics?limit=${LIST_FETCH_LIMIT}`,
+  clients: `/api/clients?limit=${LIST_FETCH_LIMIT}`,
 };
 
 const ALL_KEYS = Object.keys(PATHS);
@@ -83,7 +84,11 @@ export function CatalogProvider({ children }) {
           if (myGen !== keyGenRef.current[key]) {
             return cacheRef.current[key] ?? EMPTY;
           }
-          const list = Array.isArray(data) ? data : [];
+          const list = Array.isArray(data)
+            ? data
+            : Array.isArray(data?.items)
+              ? data.items
+              : [];
           cacheRef.current[key] = list;
           setErrors((prev) => {
             if (!prev[key]) return prev;

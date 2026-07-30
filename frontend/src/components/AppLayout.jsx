@@ -108,6 +108,7 @@ export default function AppLayout() {
     document.body.style.overflow = "hidden";
 
     const drawer = drawerRef.current;
+    const menuBtn = menuButtonRef.current;
     const focusables = drawer
       ? drawer.querySelectorAll(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -135,7 +136,7 @@ export default function AppLayout() {
     return () => {
       document.body.style.overflow = prevOverflow;
       window.removeEventListener("keydown", onKey);
-      menuButtonRef.current?.focus?.();
+      menuBtn?.focus?.();
     };
   }, [mobileOpen]);
 
@@ -152,6 +153,12 @@ export default function AppLayout() {
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:m-2 focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
+      >
+        Skip to content
+      </a>
       {/* Desktop sidebar */}
       <aside className="hidden md:flex w-56 shrink-0 flex-col border-r bg-card">
         <SidebarNav
@@ -221,7 +228,7 @@ export default function AppLayout() {
           </div>
         </header>
 
-        <main className="flex-1 overflow-auto">
+        <main id="main" tabIndex={-1} className="flex-1 overflow-auto outline-none">
           <div className="mx-auto max-w-5xl px-4 py-4 sm:px-6 sm:py-6">
             <CatalogErrorBanner />
             <Outlet />

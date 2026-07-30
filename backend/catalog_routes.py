@@ -6,23 +6,41 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from auth import clinic_filter, get_current_user, hash_password, invalidate_user_sessions, require_clinic_admin
+from appointment_serialize import appointment_out, override_log_out
+from catalog_paging import CATALOG_FETCH_LIMIT, CATALOG_LIMIT_DEFAULT, CATALOG_LIMIT_MAX
 from database import get_db
 from errors import http_internal_error, log_event
-from models import Client, Patient, Resource, Role, Service, User
+from models import Appointment, Client, OverrideLog, Patient, Resource, Role, Service, User
 from schemas import (
-    ClientCreate, ClientOut, ClientUpdate,
+    ClientCreate, ClientEraseOut, ClientExportOut, ClientListOut, ClientOut, ClientUpdate,
     PatientCreate, PatientOut, PatientUpdate,
-    ResourceCreate, ResourceOut, ResourceUpdate,
-    RoleCreate, RoleOut, RoleUpdate,
-    ServiceCreate, ServiceOut, ServiceUpdate,
+    ResourceCreate, ResourceListOut, ResourceOut, ResourceUpdate,
+    RoleCreate, RoleListOut, RoleOut, RoleUpdate,
+    ServiceCreate, ServiceListOut, ServiceOut, ServiceUpdate,
     UserOut, UserUpdate,
 )
 from timeutil import utc_now
 
 router = APIRouter()
+
+_CATALOG_LIMIT_DEFAULT = CATALOG_LIMIT_DEFAULT
+_CATALOG_LIMIT_MAX = CATALOG_LIMIT_MAX
+
+
+def _page_params(
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
+):
+    return limit, offset
+
+
+def _paginate(query, *, limit: int, offset: int):
+    total = query.count()
+    items = query.offset(offset).limit(limit).all()
+    return items, total
 
 
 def _resolve_clinic_id(
@@ -132,23 +150,22 @@ def update_user(
 
 # ── Roles ─────────────────────────────────────────────────────────────────────
 
-@router.get("/api/roles", response_model=List[RoleOut])
+@router.get("/api/roles", response_model=RoleListOut)
 def list_roles(
     include_inactive: bool = Query(False),
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     q = db.query(Role)
     if not include_inactive:
         q = q.filter(Role.is_active == True)
-    # Global roles + own clinic roles
-    if current_user.system_role == "SYSTEM_ADMIN":
-        return q.order_by(Role.name).all()
-    return (
-        q.filter((Role.clinic_id.is_(None)) | (Role.clinic_id == current_user.clinic_id))
-        .order_by(Role.name)
-        .all()
-    )
+    if current_user.system_role != "SYSTEM_ADMIN":
+        q = q.filter((Role.clinic_id.is_(None)) | (Role.clinic_id == current_user.clinic_id))
+    q = q.order_by(Role.name)
+    items, total = _paginate(q, limit=limit, offset=offset)
+    return RoleListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("/api/roles", response_model=RoleOut, status_code=201)
@@ -241,16 +258,20 @@ def update_role(
 
 # ── Resources ─────────────────────────────────────────────────────────────────
 
-@router.get("/api/resources", response_model=List[ResourceOut])
+@router.get("/api/resources", response_model=ResourceListOut)
 def list_resources(
     include_inactive: bool = Query(False),
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     q = clinic_filter(db.query(Resource), Resource, current_user)
     if not include_inactive:
         q = q.filter(Resource.is_active == True)
-    return q.order_by(Resource.name).all()
+    q = q.order_by(Resource.name)
+    items, total = _paginate(q, limit=limit, offset=offset)
+    return ResourceListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("/api/resources", response_model=ResourceOut, status_code=201)
@@ -335,16 +356,20 @@ def delete_resource(
 
 # ── Services ──────────────────────────────────────────────────────────────────
 
-@router.get("/api/services", response_model=List[ServiceOut])
+@router.get("/api/services", response_model=ServiceListOut)
 def list_services(
     include_inactive: bool = Query(False),
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     q = clinic_filter(db.query(Service), Service, current_user)
     if not include_inactive:
         q = q.filter(Service.is_active == True)
-    return q.order_by(Service.name).all()
+    q = q.order_by(Service.name)
+    items, total = _paginate(q, limit=limit, offset=offset)
+    return ServiceListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("/api/services", response_model=ServiceOut, status_code=201)
@@ -430,15 +455,17 @@ def delete_service(
 
 # ── Clients / Patients ────────────────────────────────────────────────────────
 
-@router.get("/api/clients", response_model=List[ClientOut])
+@router.get("/api/clients", response_model=ClientListOut)
 def list_clients(
     include_inactive: bool = Query(False),
     q: Optional[str] = Query(None, description="Search by name/email/phone"),
+    limit: int = Query(_CATALOG_LIMIT_DEFAULT, ge=1, le=_CATALOG_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     query = clinic_filter(
-        db.query(Client).options(joinedload(Client.patients)),
+        db.query(Client).options(selectinload(Client.patients)),
         Client,
         current_user,
     )
@@ -451,7 +478,9 @@ def list_clients(
             | (Client.email.ilike(like))
             | (Client.phone.ilike(like))
         )
-    return query.order_by(Client.name).all()
+    query = query.order_by(Client.name)
+    items, total = _paginate(query, limit=limit, offset=offset)
+    return ClientListOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("/api/clients", response_model=ClientOut, status_code=201)
@@ -602,3 +631,151 @@ def list_client_patients(
     if not include_inactive:
         q = q.filter(Patient.is_active == True)
     return q.order_by(Patient.name).all()
+
+
+def _assert_client_access(client: Client, current_user: User) -> None:
+    if current_user.system_role != "SYSTEM_ADMIN" and client.clinic_id != current_user.clinic_id:
+        raise HTTPException(403, "Access denied.")
+
+
+@router.get("/api/clients/{client_id}/export", response_model=ClientExportOut)
+def export_client(
+    client_id: int,
+    limit: int = Query(CATALOG_FETCH_LIMIT, ge=1, le=CATALOG_LIMIT_MAX),
+    current_user: User = Depends(require_clinic_admin),
+    db: Session = Depends(get_db),
+):
+    """GDPR-style data export for a client and related clinic records."""
+    client = (
+        db.query(Client)
+        .options(selectinload(Client.patients))
+        .filter(Client.id == client_id)
+        .first()
+    )
+    if not client:
+        raise HTTPException(404, "Client not found.")
+    _assert_client_access(client, current_user)
+
+    appt_q = (
+        db.query(Appointment)
+        .options(
+            selectinload(Appointment.allocations),
+            selectinload(Appointment.override_logs).joinedload(OverrideLog.overridden_by_user),
+            selectinload(Appointment.override_logs).joinedload(OverrideLog.rule),
+        )
+        .filter(Appointment.client_id == client.id)
+        .order_by(Appointment.start_time.desc())
+    )
+    total_appts = appt_q.count()
+    appts = appt_q.limit(limit).all()
+    truncated = total_appts > len(appts)
+
+    override_logs = []
+    for appt in appts:
+        for log in appt.override_logs or []:
+            override_logs.append(override_log_out(log))
+
+    log_event(
+        "client_exported",
+        user_id=current_user.id,
+        clinic_id=client.clinic_id,
+        detail=f"client={client.id} appts={len(appts)} truncated={truncated}",
+    )
+    return ClientExportOut(
+        exported_at=utc_now(),
+        client=ClientOut.model_validate(client),
+        patients=[PatientOut.model_validate(p) for p in (client.patients or [])],
+        appointments=[appointment_out(a) for a in appts],
+        override_logs=override_logs,
+        appointments_truncated=truncated,
+    )
+
+
+@router.post("/api/clients/{client_id}/erase", response_model=ClientEraseOut)
+def erase_client(
+    client_id: int,
+    current_user: User = Depends(require_clinic_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    GDPR erasure: anonymize client/patient PII, appointment name snapshots,
+    and override-log notes. Scheduling history rows are retained for clinic
+    operations/audit integrity (stable IDs remain — see PRIVACY.md).
+    """
+    client = (
+        db.query(Client)
+        .options(selectinload(Client.patients))
+        .filter(Client.id == client_id)
+        .first()
+    )
+    if not client:
+        raise HTTPException(404, "Client not found.")
+    _assert_client_access(client, current_user)
+
+    if client.name.startswith("Erased Client #") and client.email is None and client.phone is None:
+        return ClientEraseOut(
+            client_id=client.id,
+            erased=True,
+            message="Client was already erased.",
+        )
+
+    client.name = f"Erased Client #{client.id}"
+    client.email = None
+    client.phone = None
+    client.notes = None
+    client.is_active = False
+    _stamp_update(client)
+
+    for patient in client.patients or []:
+        patient.name = f"Erased Patient #{patient.id}"
+        patient.species = None
+        patient.breed = None
+        patient.notes = None
+        patient.is_active = False
+        _stamp_update(patient)
+
+    appt_ids = [
+        row[0]
+        for row in db.query(Appointment.id).filter(Appointment.client_id == client.id).all()
+    ]
+    (
+        db.query(Appointment)
+        .filter(Appointment.client_id == client.id)
+        .update(
+            {
+                "client_name": "REDACTED",
+                "patient_name": "REDACTED",
+                "updated_at": utc_now(),
+                "updated_by_user_id": current_user.id,
+            },
+            synchronize_session=False,
+        )
+    )
+    if appt_ids:
+        (
+            db.query(OverrideLog)
+            .filter(OverrideLog.appointment_id.in_(appt_ids))
+            .update({"notes": "[redacted]"}, synchronize_session=False)
+        )
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise http_internal_error(exc, action="client_erase")
+
+    log_event(
+        "client_erased",
+        level=30,
+        user_id=current_user.id,
+        clinic_id=client.clinic_id,
+        detail=f"client={client.id}",
+    )
+    return ClientEraseOut(
+        client_id=client.id,
+        erased=True,
+        message=(
+            "Client and patient personal data anonymized; appointment names and "
+            "override notes redacted. Stable IDs retained for scheduling integrity."
+        ),
+    )

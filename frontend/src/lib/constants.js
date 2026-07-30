@@ -35,3 +35,6 @@ export const APPOINTMENT_STATUS_VARIANT = {
   cancelled: "outline",
   no_show: "destructive",
 };
+
+/** Max rows admin list pages and catalog warm-loads request in one shot (matches API max). */
+export const LIST_FETCH_LIMIT = 500;

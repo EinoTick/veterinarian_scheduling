@@ -17,6 +17,7 @@ import {
   formatInClinic,
 } from "@/lib/datetime";
 import { useClinicTimezone } from "@/hooks/useClinicTimezone";
+import { useConfirmDialog } from "@/hooks/useConfirmDialog";
 import { APPOINTMENT_STATUS_VARIANT as STATUS_VARIANT } from "@/lib/constants";
 import { DateTime } from "luxon";
 
@@ -33,6 +34,7 @@ const PAGE_SIZE = 50;
 export default function BookingsPage() {
   const { apiFetch } = useAuth();
   const { services, ensure } = useCatalog();
+  const { confirm, ConfirmDialog } = useConfirmDialog();
   const clinicTz = useClinicTimezone();
   const [appointments, setAppointments] = useState([]);
   const [total, setTotal] = useState(0);
@@ -93,8 +95,12 @@ export default function BookingsPage() {
 
   async function setStatus(appt, status) {
     if (status === "cancelled") {
-      const ok = window.confirm("Cancel this appointment?");
-      if (!ok) return;
+      if (!(await confirm({
+        title: "Cancel appointment?",
+        description: "Cancel this appointment?",
+        destructive: true,
+        confirmLabel: "Cancel appointment",
+      }))) return;
     }
     setBusyId(appt.id);
     setLoadError(null);
@@ -106,8 +112,7 @@ export default function BookingsPage() {
             body: JSON.stringify({ status }),
           });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        setLoadError(typeof err.detail === "string" ? err.detail : "Status update failed.");
+        setLoadError(await readErrorMessage(res, "Status update failed."));
         return;
       }
       await loadData();
@@ -276,6 +281,8 @@ export default function BookingsPage() {
         onClose={() => setDetailId(null)}
         onChanged={() => loadData()}
       />
+
+      <ConfirmDialog />
     </div>
   );
 }
